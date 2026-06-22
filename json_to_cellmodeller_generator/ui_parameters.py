@@ -1,6 +1,6 @@
 import ipywidgets as widgets
 from IPython.display import display, clear_output
-from json_to_cellmodeller_generator.cellmodeller_file_writer import extract_genes_and_qs_actions, extract_ncb_production_genes_and_actions, extract_biochemical_reactions, normalize_signal_name
+from json_to_cellmodeller_generator.cellmodeller_file_writer import parse_json, analyse_circuit, _as_list, generate_update_logic
 import numpy as np
 
 def display_form(sbol_data):
@@ -19,7 +19,7 @@ def display_form(sbol_data):
       - qs_actions_map (dict): A map of quorum sensing actions.
       - biochemical_reactions_data (list): Data on biochemical reactions.
   """
-  genes_detected, qs_actions_map = extract_genes_and_qs_actions(
+  genes_detected, qs_actions_map = parse_json(
     sbol_data.get("interactions", []),
     sbol_data.get("hierarchy", {}),
     sbol_data.get("components", []),
@@ -29,7 +29,7 @@ def display_form(sbol_data):
   # Create a modifiable copy of qs_actions_map to be potentially updated by other functions
   qs_actions_map_modifiable = qs_actions_map.copy()
 
-  auxiliary_genes_ncb, ncb_emission_actions_info = extract_ncb_production_genes_and_actions(
+  auxiliary_genes_ncb, ncb_emission_actions_info = generate_update_logic(
     sbol_data.get("interactions", []),
     sbol_data.get("ED", []),
     sbol_data.get("components", []),
@@ -37,7 +37,7 @@ def display_form(sbol_data):
     qs_actions_map_modifiable,
   )
 
-  biochemical_reactions_data = extract_biochemical_reactions(
+  biochemical_reactions_data = analyse_circuit(
     sbol_data.get("interactions", []),
     sbol_data.get("ED", []),
     sbol_data.get("hierarchy", {}),
@@ -438,7 +438,7 @@ def display_form(sbol_data):
     signal_boxes_list.append(signal_section_title_html)
 
     for chem_name_original_str in sorted(list(chemical_names_in_ed)):
-      normalized_chem_name_for_qs = normalize_signal_name(chem_name_original_str)
+      normalized_chem_name_for_qs = _as_list(chem_name_original_str)
       is_sensed_as_qs_effector = normalized_chem_name_for_qs in qs_actions_map
       is_emitted_via_ncb = chem_name_original_str in signals_emitted_by_ncb
       is_product_of_biochem_conv = chem_name_original_str in signals_produced_by_biochem_conversion
