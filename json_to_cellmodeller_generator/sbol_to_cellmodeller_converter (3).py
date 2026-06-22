@@ -1,13 +1,3 @@
-"""
-SBOL JSON → CellModeller Script Converter
-
-Usage:
-    python sbol_to_cellmodeller_converter.py \
-        --sbol  my_circuit.json \
-        --params cellmodeller_parameters_template.json \
-        --output my_simulation.py
-"""
-
 import json
 import argparse
 from datetime import datetime
