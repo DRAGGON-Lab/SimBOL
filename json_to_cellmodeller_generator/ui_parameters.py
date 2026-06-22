@@ -1,6 +1,6 @@
 import ipywidgets as widgets
 from IPython.display import display, clear_output
-from json_to_gro_generator.gro_file_compiler import extract_genes_and_qs_actions, extract_ncb_production_genes_and_actions, extract_biochemical_reactions, normalize_signal_name
+from json_to_cellmodeller_generator.cellmodeller_file_writer import extract_genes_and_qs_actions, extract_ncb_production_genes_and_actions, extract_biochemical_reactions, normalize_signal_name
 import numpy as np
 
 def display_form(sbol_data):
@@ -15,7 +15,7 @@ def display_form(sbol_data):
   Returns:
     tuple: A tuple containing:
       - parameters (dict): The collected parameters from the form.
-      - all_genes_for_gro_generation (list): A list of all genes (detected and auxiliary) for GRO generation.
+      - all_genes_for_cm_generation (list): A list of all genes (detected and auxiliary) for cellmodeller generation.
       - qs_actions_map (dict): A map of quorum sensing actions.
       - biochemical_reactions_data (list): Data on biochemical reactions.
   """
@@ -532,11 +532,10 @@ def display_form(sbol_data):
 
     for idx, reaction_data_conv in enumerate(s1_s2_enzymatic_reactions_for_ui):
       enzyme_display_name_str = reaction_data_conv["enzyme"]["original_name"]
-      enzyme_gro_id_display_str = reaction_data_conv["enzyme"]["gro_id"] # GRO Action
       s1_display_name_str = reaction_data_conv["reactant_signal"]["original_name"]
       s2_display_name_str = reaction_data_conv["product_signal"]["original_name"]
       reaction_key_ui_str = reaction_data_conv.get("sbol_interaction_id", f"{s1_display_name_str}_to_{s2_display_name_str}_by_{enzyme_display_name_str}")
-      ui_label_html_str = (f"<b>Reaction {idx+1}: {s1_display_name_str} → {s2_display_name_str}</b> <i> Catalyzed by: {enzyme_display_name_str} (GRO ID: {enzyme_gro_id_display_str})</i>")
+      ui_label_html_str = (f"<b>Reaction {idx+1}: {s1_display_name_str} → {s2_display_name_str}</b> <i> Catalyzed by: {enzyme_display_name_str}</i>")
 
       conversion_rate_widget = widgets.FloatText(description="Conversion Rate (S1 Abs & S2 Em, units/dt):", value=1.0, step=0.1, tooltip="Units of S1 absorbed and S2 emitted per cell per dt", style={'description_width': 'initial'}, layout=content_widget_layout_large)
       absorption_type_widget = widgets.Dropdown(description="S1 Abs. Type:", options=["exact", "area", "average"], value="area", style={'description_width': 'initial'}, layout=content_widget_layout_medium)
@@ -641,18 +640,18 @@ def display_form(sbol_data):
     user_feedback_messages = []
 
     # Process dt and Growth Rate
-    dt_minutes_for_gro_val = dt_minutes_widget.value
-    if dt_minutes_for_gro_val <= 0:
+    dt_minutes_for_cm_val = dt_minutes_widget.value
+    if dt_minutes_for_cm_val <= 0:
       user_feedback_messages.append("Warning: Timestep (dt) must be > 0. Using default 0.1 minutes.")
-      dt_minutes_for_gro_val = 0.1
+      dt_minutes_for_cm_val = 0.1
 
     doubling_time_min_input_val = doubling_time_widget.value
-    growth_rate_for_gro_val = 0.0
+    growth_rate_for_cm_val = 0.0
     if doubling_time_min_input_val > 0:
-      growth_rate_for_gro_val = np.log(2) / doubling_time_min_input_val
+      growth_rate_for_cm_val = np.log(2) / doubling_time_min_input_val
     else:
       default_doubling_time_minutes = 20.0
-      growth_rate_for_gro_val = np.log(2) / default_doubling_time_minutes
+      growth_rate_for_cm_val = np.log(2) / default_doubling_time_minutes
       user_feedback_messages.append(f"Warning: Doubling time ('{doubling_time_min_input_val}') must be > 0. Using default growth rate corresponding to {default_doubling_time_minutes} min doubling time.")
 
     # Collect plasmid definitions
@@ -664,11 +663,11 @@ def display_form(sbol_data):
         if plasmid_name_str_save:
           gene_checkboxes = plasmid_widgets_set.get("gene_checkboxes", {})
           selected_genes_list_ui = [name for name, cb in gene_checkboxes.items() if cb.value]
-          genes_for_plasmid_gro_set = {f'"{gene_ui_name}"' for gene_ui_name in selected_genes_list_ui}
+          genes_for_plasmid = {f'"{gene_ui_name}"' for gene_ui_name in selected_genes_list_ui}
           for aux_gene_name_formatted in formatted_auxiliary_gene_names_ncb:
-            genes_for_plasmid_gro_set.add(aux_gene_name_formatted)
-          if genes_for_plasmid_gro_set: # Only save if there are genes (real or auxiliary)
-            plasmid_definitions_to_save[plasmid_name_str_save] = sorted(list(genes_for_plasmid_gro_set))
+            genes_for_plasmid.add(aux_gene_name_formatted)
+          if genes_for_plasmid: # Only save if there are genes (real or auxiliary)
+            plasmid_definitions_to_save[plasmid_name_str_save] = sorted(list(genes_for_plasmid))
           else: # No real genes selected, and no auxiliary genes applicable
             user_feedback_messages.append(f"Info: Plasmid '{plasmid_name_str_save}' was defined in the UI but no genes were assigned (genes from the selector are required). This plasmid will be ignored.")
         else: # Plasmid has no name
@@ -683,7 +682,7 @@ def display_form(sbol_data):
         "This could be because all plasmid UI entries were left unnamed, had no genes selected from the 'Assign Genes' selector, "
         "or were removed."
         "This will impact E.coli cell setup (if they require plasmids) and conjugation features. "
-        "The final .gro file might not include plasmid specifications."
+        "The final cellmodeller file might not include plasmid specifications."
       )
       if not plasmids_ui_list:
         message = (
@@ -722,7 +721,7 @@ def display_form(sbol_data):
       message = (
         "Warning: No valid E. coli population groups were configured. "
         "This could be because all population UI entries had issues (e.g., zero cells) or were removed. "
-        "The simulation setup might rely on default population creation in the .gro file, or no cells will be simulated."
+        "The simulation setup might rely on default population creation in the cellmodeller file, or no cells will be simulated."
       )
       if not ecoli_population_ui_list:
         message = (
@@ -731,9 +730,9 @@ def display_form(sbol_data):
       user_feedback_messages.append(message)
 
     parameters_dict.update({
-      "dt": dt_minutes_for_gro_val,
+      "dt": dt_minutes_for_cm_val,
       "population_max": population_max_widget.value,
-      "growth_rate": growth_rate_for_gro_val,
+      "growth_rate": growth_rate_for_cm_val,
       "gene_parameters": {},
       "signal_parameters": {},
       "plasmid_configuration": {"defined_plasmids": plasmid_definitions_to_save},
@@ -820,9 +819,9 @@ def display_form(sbol_data):
         if plasmid_name_conj_save_str not in valid_plasmid_names_for_conj_save: user_feedback_messages.append(f"Info: Plasmid '{plasmid_name_conj_save_str}' ... Ignoring."); continue
         if plasmid_name_conj_save_str in dynamic_conjugation_rate_widgets:
           events_per_doubling_time = dynamic_conjugation_rate_widgets[plasmid_name_conj_save_str].value
-          gro_conjugation_rate_val = max(0.0, events_per_doubling_time)
+          cm_conjugation_rate_val = max(0.0, events_per_doubling_time)
           if events_per_doubling_time < 0: user_feedback_messages.append(f"Warning: Conjugation rate ... Using 0.")
-          conjugation_settings_to_save[plasmid_name_conj_save_str] = gro_conjugation_rate_val
+          conjugation_settings_to_save[plasmid_name_conj_save_str] = cm_conjugation_rate_val
         else: conjugation_settings_to_save[plasmid_name_conj_save_str] = 0.0; user_feedback_messages.append(f"Info: Conjugation rate widget for '{plasmid_name_conj_save_str}' ... Defaulting to 0.")
     parameters_dict["conjugation_parameters"] = {"enabled": is_conjugation_enabled_val, "settings": conjugation_settings_to_save}
 
@@ -874,6 +873,6 @@ def display_form(sbol_data):
   toggle_conjugation_details({'new': conjugation_checkbox.value})
 
   display(main_form_widget)
-  all_genes_for_gro_generation = genes_detected + auxiliary_genes_ncb
+  all_genes_for_cm_generation = genes_detected + auxiliary_genes_ncb
 
-  return parameters_dict, all_genes_for_gro_generation, qs_actions_map, biochemical_reactions_data
+  return parameters_dict, all_genes_for_cm_generation, qs_actions_map, biochemical_reactions_data
