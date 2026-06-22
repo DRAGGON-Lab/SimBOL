@@ -1,4 +1,4 @@
-from json_to_gro_generator.gro_file_compiler import extract_signal_definitions
+from json_to_cellmdeller_generator.cellmodeller_file_compiler import extract_signal_definitions
 
 def prepare_parameters_and_data(sbol_data, parameters):
   """
