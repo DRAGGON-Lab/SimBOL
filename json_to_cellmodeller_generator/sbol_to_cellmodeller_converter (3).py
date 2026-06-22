@@ -413,7 +413,8 @@ def generate_script(proteins, modules, interactions, component_map, params,
     if sig_enabled and signals:
         diff_rates = [str(s.get("diffusion_rate",  0.1))  for s in signals]
         deg_rates  = [str(s.get("degradation_rate", 0.01)) for s in signals]
-        chem_import   = "from CellModeller.Chemical.Chemics import Chemics"
+        chem_import1   = "from CellModeller.Signalling.GridDiffusion import GridDiffusion"
+        chem_import2   = "from CellModeller.Integration.CLCrankNicIntegrator import CLCrankNicIntegrator"
         chem_init     = (
             f"    chem = Chemics(sim,\n"
             f"        nSignals={len(signals)},\n"
@@ -423,7 +424,8 @@ def generate_script(proteins, modules, interactions, component_map, params,
         )
         sim_init_call = "    sim.init(biophys, regul, chem, None)"
     else:
-        chem_import   = "# from CellModeller.Chemical.Chemics import Chemics"
+        chem_import1   = "# from CellModeller.Signalling.GridDiffusion import GridDiffusion"
+        chem_import2   = "# from CellModeller.Integration.CLCrankNicIntegrator import CLCrankNicIntegrator"
         chem_init     = "    # Signaling disabled — set 'enabled': true in parameters to activate\n"
         sim_init_call = "    sim.init(biophys, regul, None, None)"
 
@@ -478,7 +480,8 @@ def generate_script(proteins, modules, interactions, component_map, params,
 
 from CellModeller.Regulation.ModuleRegulator import ModuleRegulator
 from CellModeller.Biophysics.BacterialModels.CLBacterium import CLBacterium
-{chem_import}
+{chem_import1}
+{chem_import2}
 import numpy as np
 import random
 {chem_consts_section}
