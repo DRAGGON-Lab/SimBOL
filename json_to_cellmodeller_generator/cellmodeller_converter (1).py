@@ -1,6 +1,6 @@
 """
-SBOL JSON → CellModeller Script Converter
-==========================================
+SBOL JSON to CellModeller Script Converter
+
 Topology (who produces what, what activates what) is auto-detected from SBOL.
 Numbers (rates, grid dimensions) come from the parameters dict.
 
@@ -13,7 +13,7 @@ import argparse
 from datetime import datetime
 
 
-# ── INTERACTION TYPE SETS ────────────────────────────────────────────────────
+# INTERACTION TYPE SETS 
 
 PRODUCTION_TYPES       = {"Genetic Production", "Production"}
 INHIBITION_TYPES       = {"Inhibition", "Repression", "Genetic Inhibition"}
@@ -22,7 +22,7 @@ DEGRADATION_TYPES      = {"Degradation"}
 BIOCHEM_REACTION_TYPES = {"Biochemical Reaction", "Non-Covalent Binding", "Control"}
 
 
-# ── FLUORESCENT PROTEIN COLOUR LOOKUP ───────────────────────────────────────
+# FLUORESCENT PROTEIN COLOUR LOOKUP
 # Keyword (substring of display_id, lowercased) → (R, G, B)
 _FP_KEYWORDS = {
     "gfp":        (0.0, 1.0, 0.2),
@@ -64,7 +64,7 @@ _FP_BIOBRICK = {
 }
 
 
-# ── HELPERS ──────────────────────────────────────────────────────────────────
+# HELPERS 
 
 def _as_list(val):
     """Normalise a participants value (string or list) to a list."""
@@ -94,7 +94,7 @@ def _first(val):
     return val[0] if isinstance(val, list) else val
 
 
-# ── PARSER ───────────────────────────────────────────────────────────────────
+# PARSER
 
 def parse_json(sbol_data, ignore_ids=None):
     """
@@ -160,14 +160,14 @@ def parse_json(sbol_data, ignore_ids=None):
     return proteins, modules, interactions, component_map, ed_chemicals
 
 
-# ── SIGNAL TOPOLOGY DETECTION ────────────────────────────────────────────────
+# SIGNAL TOPOLOGY DETECTION
 
 def detect_signaling_topology(proteins, interactions, component_map, ed_chemicals):
     """
     Auto-detect the three intercellular-signalling facts from SBOL topology.
 
     Returns
-    -------
+   
     diffusible_signals : set[str]
         display_ids of ED chemicals that appear as Stimulator in any
         Stimulation interaction.  These are the molecules that GridDiffusion
@@ -186,7 +186,7 @@ def detect_signaling_topology(proteins, interactions, component_map, ed_chemical
     protein_ids  = {p["display_id"] for p in proteins}
     ed_chem_ids  = {c["display_id"] for c in (ed_chemicals or [])}
 
-    # ── 1. Chemicals that appear as Stimulator ──────────────────────────────
+    # Chemicals that appear as Stimulator
     diffusible_signals: set = set()
     for inter in interactions:
         if inter["type"] in STIMULATION_TYPES:
@@ -195,7 +195,7 @@ def detect_signaling_topology(proteins, interactions, component_map, ed_chemical
                     if sid in ed_chem_ids:
                         diffusible_signals.add(sid)
 
-    # ── 2. Proteins that produce a diffusible signal ─────────────────────────
+    # Proteins that produce a diffusible signal 
     signal_producers: dict = {}
     for inter in interactions:
         if inter["type"] in BIOCHEM_REACTION_TYPES:
@@ -208,7 +208,7 @@ def detect_signaling_topology(proteins, interactions, component_map, ed_chemical
                     if mid in protein_ids:
                         signal_producers.setdefault(product_id, []).append(mid)
 
-    # ── 3. Promoters activated by a diffusible signal ───────────────────────
+    # Promoters activated by a diffusible signal
     signal_activated_promoters: dict = {}
     for inter in interactions:
         if inter["type"] in STIMULATION_TYPES:
@@ -225,14 +225,14 @@ def detect_signaling_topology(proteins, interactions, component_map, ed_chemical
     return diffusible_signals, signal_producers, signal_activated_promoters
 
 
-# ── CIRCUIT ANALYSIS ─────────────────────────────────────────────────────────
+# CIRCUIT ANALYSIS
 
 def analyse_circuit(proteins, interactions, component_map, ed_chemicals=None):
     """
     Build complete regulatory lookup tables, including signal topology.
 
     Returns
-    -------
+    
     protein_regulation : dict
         display_id → {promoter, inhibitors, activators, signal_activator}
     promoter_inhibitors : dict
@@ -249,7 +249,7 @@ def analyse_circuit(proteins, interactions, component_map, ed_chemicals=None):
     diffusible_signals, signal_producers, signal_activated_promoters = \
         detect_signaling_topology(proteins, interactions, component_map, ed_chemicals)
 
-    # ── Step 1: promoter → protein (from Production interactions) ───────────
+    # promoter to protein (from Production interactions)
     protein_promoter: dict = {}
     for inter in interactions:
         if inter["type"] in PRODUCTION_TYPES:
@@ -258,7 +258,7 @@ def analyse_circuit(proteins, interactions, component_map, ed_chemicals=None):
             if promoter_id and product_id:
                 protein_promoter[product_id] = promoter_id
 
-    # ── Step 2: promoter → inhibitors / activators ───────────────────────────
+    # promoter to inhibitors / activators 
     promoter_inhibitors: dict = {}
     promoter_activators: dict = {}
 
@@ -284,7 +284,7 @@ def analyse_circuit(proteins, interactions, component_map, ed_chemicals=None):
                 if act_id in protein_ids:
                     promoter_activators.setdefault(activated_id, []).append(act_id)
 
-    # ── Step 3: per-protein regulation summary ───────────────────────────────
+    # per-protein regulation summary 
     protein_regulation: dict = {}
     for protein in proteins:
         pid      = protein["display_id"]
@@ -297,7 +297,7 @@ def analyse_circuit(proteins, interactions, component_map, ed_chemicals=None):
             "signal_activator":  signal_activated_promoters.get(promoter),
         }
 
-    # ── Step 4: direct protein-level inhibitions (e.g. aTc → TetR) ──────────
+    # direct protein-level inhibitions (e.g. aTc to TetR) 
     direct_inhibitions = []
     for inter in interactions:
         if inter["type"] in INHIBITION_TYPES:
@@ -310,7 +310,7 @@ def analyse_circuit(proteins, interactions, component_map, ed_chemicals=None):
             diffusible_signals, signal_producers, signal_activated_promoters)
 
 
-# ── MODULE HELPER ─────────────────────────────────────────────────────────────
+# MODULE HELPER
 
 def find_controlling_module(protein_display_id, modules, interactions):
     """Return the module dict that contains the promoter driving this protein."""
@@ -326,7 +326,7 @@ def find_controlling_module(protein_display_id, modules, interactions):
     return None
 
 
-# ── UPDATE LOGIC GENERATOR ───────────────────────────────────────────────────
+# UPDATE LOGIC GENERATOR
 
 def generate_update_logic(proteins, modules, interactions, component_map, params,
                           ed_chemicals=None):
@@ -354,8 +354,7 @@ def generate_update_logic(proteins, modules, interactions, component_map, params
 
     lines = []
 
-    # Pre-compute inhibition Hill factors (one per repressed promoter, reused
-    # by every protein sharing that promoter)
+    # Pre-compute inhibition Hill factors (one per repressed promoter, reused by every protein sharing that promoter)
     repressed_promoters = sorted(promoter_inhibitors)
     if repressed_promoters:
         lines.append("        # — inhibition factors —")
@@ -488,7 +487,7 @@ def generate_update_logic(proteins, modules, interactions, component_map, params
     return "\n".join(lines) if lines else "        pass"
 
 
-# ── COLOUR UPDATE HELPER ──────────────────────────────────────────────────────
+# COLOR UPDATE HELPER 
 
 def generate_color_update(proteins, params):
     """
@@ -527,7 +526,7 @@ def generate_color_update(proteins, params):
     return None
 
 
-# ── SCRIPT ASSEMBLER ──────────────────────────────────────────────────────────
+# SCRIPT ASSEMBLER
 
 def generate_script(proteins, modules, interactions, component_map, params,
                     ed_chemicals=None):
@@ -558,7 +557,7 @@ def generate_script(proteins, modules, interactions, component_map, params,
 
     signal_prod_rate = kin.get("signal_production_rate", 0.1)
 
-    # ── Resolve signals ──────────────────────────────────────────────────────
+    # Resolve signals
     (_, _, _,
      diffusible_signals, signal_producers, signal_activated_promoters) = \
         analyse_circuit(proteins, interactions, component_map, ed_chemicals)
@@ -584,7 +583,7 @@ def generate_script(proteins, modules, interactions, component_map, params,
     n_signals    = len(all_signals)
     use_signals  = sig_enabled and n_signals > 0
 
-    # ── Cell type lookup dicts ───────────────────────────────────────────────
+    # Cell type lookup dicts 
     color_lines, len_lines, growth_lines, noise_lines = [], [], [], []
     for i, ct in enumerate(cell_types):
         c = ct.get("color", [1.0, 0.3, 0.3])
@@ -599,7 +598,7 @@ def generate_script(proteins, modules, interactions, component_map, params,
     growth_dict = "{\n" + "\n".join(growth_lines) + "\n}"
     noise_dict  = "{\n" + "\n".join(noise_lines)  + "\n}"
 
-    # ── addCell calls ─────────────────────────────────────────────────────────
+    # addCell calls 
     add_cell_lines = []
     for i, ct in enumerate(cell_types):
         pos = ct.get("initial_pos", [0.0, float(i) * 3.0, 0.0])
@@ -611,7 +610,7 @@ def generate_script(proteins, modules, interactions, component_map, params,
         )
     add_cells_str = "\n".join(add_cell_lines)
 
-    # ── Signalling setup block ────────────────────────────────────────────────
+    # Signalling setup block
     if use_signals:
         diff_rates = [str(s["diffusion_rate"])  for s in all_signals]
         deg_rates  = [str(s["degradation_rate"]) for s in all_signals]
@@ -634,14 +633,14 @@ def generate_script(proteins, modules, interactions, component_map, params,
         sig_init      = "    # Signalling disabled — set signaling.enabled=true in params to activate"
         sim_init_call = "    sim.init(biophys, regul, None, None)"
 
-    # ── random seed ───────────────────────────────────────────────────────────
+    # random seed 
     random_seed_line = (
         f"    random.seed({random_seed})"
         if random_seed is not None
         else "    # tip: set simulation.random_seed in params for reproducibility"
     )
 
-    # ── init() protein attributes ─────────────────────────────────────────────
+    # init() protein attributes
     if proteins:
         init_proteins = "    # proteins\n" + "\n".join(
             f"    cell.{p['var_name']} = 0.0  # {p['display_id']}"
@@ -656,7 +655,7 @@ def generate_script(proteins, modules, interactions, component_map, params,
         init_proteins   = "    # no proteins in SBOL ED"
         divide_proteins = ""
 
-    # ── init() signal-sensing attributes ─────────────────────────────────────
+    # init() signal-sensing attributes
     # cell.<signal>_sensed bridges signalRates() → update()
     if use_signals and diffusible_signals:
         sig_sensed_attrs = sorted(
@@ -671,7 +670,7 @@ def generate_script(proteins, modules, interactions, component_map, params,
         init_signals   = ""
         divide_signals = ""
 
-    # ── External (non-diffusible) chemical constants ──────────────────────────
+    # External (non-diffusible) chemical constants
     external_chems = [
         c for c in (ed_chemicals or [])
         if c["display_id"] not in diffusible_signals
@@ -689,7 +688,7 @@ def generate_script(proteins, modules, interactions, component_map, params,
     else:
         chem_consts = ""
 
-    # ── Topology comment block ────────────────────────────────────────────────
+    # Topology comment block
     if diffusible_signals or signal_producers or signal_activated_promoters:
         topo_lines = ["# AUTO-DETECTED SIGNAL TOPOLOGY"]
         if diffusible_signals:
@@ -702,14 +701,14 @@ def generate_script(proteins, modules, interactions, component_map, params,
     else:
         topo_comment = ""
 
-    # ── update() body ────────────────────────────────────────────────────────
+    # update() body
     update_logic = generate_update_logic(
         proteins, modules, interactions, component_map, params, ed_chemicals
     )
     color_update_raw = generate_color_update(proteins, params)
     color_update_str = ("\n" + color_update_raw + "\n") if color_update_raw else ""
 
-    # ── signalRates() body ────────────────────────────────────────────────────
+    # signalRates() body
     if use_signals:
         sr_lines = []
         for sig_obj in all_signals:
@@ -752,16 +751,15 @@ def generate_script(proteins, modules, interactions, component_map, params,
     else:
         signal_rates_fn = ""
 
-    # ── Assemble ──────────────────────────────────────────────────────────────
+    # Assemble
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     script = f"""\
 # CellModeller simulation script
 # Generated : {now}
 # Converter : json_to_cellmodeller.py
-# ─────────────────────────────────────────────────────────────────────────────
 # Topology (who produces what signal, what it activates) is auto-detected from
 # the SBOL JSON.  All numerical rates are defined in the params file / dict.
-# ─────────────────────────────────────────────────────────────────────────────
+
 
 from CellModeller.Regulation.ModuleRegulator import ModuleRegulator
 from CellModeller.Biophysics.BacterialModels.CLBacterium import CLBacterium
@@ -771,13 +769,13 @@ import numpy as np
 import random
 {chem_consts}
 {topo_comment}
-# ── simulation constants ──────────────────────────────────────────────────────
+# simulation constants
 maxCells = {max_cells}
 gridLen  = {grid_len}   # grid cells per axis
 gridSize = {grid_size}  # µm per grid cell  →  domain = {grid_len * grid_size:.0f} × {grid_len * grid_size:.0f} µm
 
 
-# ── cell type lookup tables ───────────────────────────────────────────────────
+# cell type lookup tables
 
 cell_colors          = {colors_dict}
 cell_lens            = {lens_dict}
@@ -785,7 +783,7 @@ cell_growth_rates    = {growth_dict}
 cell_division_noise  = {noise_dict}
 
 
-# ── SETUP ─────────────────────────────────────────────────────────────────────
+# SETUP
 
 def setup(sim):
 {random_seed_line}
@@ -805,7 +803,7 @@ def setup(sim):
 {add_cells_str}
 
 
-# ── INIT ──────────────────────────────────────────────────────────────────────
+# INIT
 
 def init(cell):
     cell.targetVol  = (cell_lens[cell.cellType]
@@ -815,7 +813,7 @@ def init(cell):
 {init_proteins}{init_signals}
 
 
-# ── UPDATE ────────────────────────────────────────────────────────────────────
+# UPDATE
 
 def update(cells):
     for id, cell in cells.items():
@@ -825,7 +823,7 @@ def update(cells):
 {update_logic}
 
 
-# ── DIVIDE ────────────────────────────────────────────────────────────────────
+# DIVIDE
 
 def divide(parent, d1, d2):
     d1.cellType = parent.cellType
@@ -838,7 +836,7 @@ def divide(parent, d1, d2):
     return script
 
 
-# ── CLI ENTRY POINT ───────────────────────────────────────────────────────────
+# CLI ENTRY POINT
 
 def main():
     parser = argparse.ArgumentParser(
