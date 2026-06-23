@@ -1,36 +1,9 @@
 """
 params.py
-=========
+
 Builds the `parameters` dict consumed by `generate_script()` (and `main()`)
 in cellmodeller_converter.py, and provides fluorescent-protein colour hints
 used by the UI form in ui_params.py.
-
-This module previously imported `extract_signal_definitions` from
-`json_to_cellmdeller_generator.cellmodeller_file_writer`, a module/function
-that doesn't exist in the actual converter (cellmodeller_converter.py uses
-`parse_json`, `detect_signaling_topology`, `analyse_circuit`, and
-`generate_script`, and has no concept of GRO-style "signal definitions").
-It has been rewritten to import the real helpers and to produce a
-parameters dict whose shape exactly matches what `generate_script()` reads:
-
-    {
-      "simulation":   {max_cells, jitter_z, gamma, pickle_steps, random_seed},
-      "cell_types":   [{display_name, color, division_length, growth_rate,
-                        division_noise, initial_pos, initial_dir}, ...],
-      "signaling":    {enabled, grid_len, grid_size, boundary_condition,
-                        signals: [{name, diffusion_rate, degradation_rate}, ...]},
-      "kinetics":     {production_rate, max_production_rate, degradation_rate,
-                        hill_coefficient, activation_threshold,
-                        repression_threshold, signal_production_rate},
-      "sbol_mapping": {ignore_component_ids: [...]},
-    }
-
-Getting "signaling.signals" right is what makes intercellular signalling
-(e.g. quorum sensing via AHL/GridDiffusion) actually work in the generated
-script — each diffusible signal auto-detected from the SBOL topology needs
-a diffusion_rate/degradation_rate entry here, keyed by the signal's
-display_id, or `generate_script()` will silently fall back to the default
-0.1 / 0.01 values for it.
 """
 
 from cellmodeller_converter import (
@@ -39,14 +12,13 @@ from cellmodeller_converter import (
 )
 
 
-# ──────────────────────────────────────────────────────────────────────────
-# Fluorescent-protein keyword / BioBrick → colour-name lookup.
+# Fluorescent-protein keyword / BioBrick to colour-name lookup.
 #
 # This is *not* used by generate_script() itself (it has its own RGB lookup
 # in _FP_KEYWORDS / _FP_BIOBRICK for per-cell shading by expression level).
 # It exists purely so the UI can suggest a sensible default strain colour
 # when a reporter protein is detected in the circuit.
-# ──────────────────────────────────────────────────────────────────────────
+
 PROTEIN_REPORTER_COLOR_NAMES = {
     # Green
     "BBa_E0040": "green", "BBa_K2148009": "green", "BBa_K2560042": "green",
@@ -80,8 +52,9 @@ PROTEIN_REPORTER_COLOR_NAMES = {
     "mTFP2": "cyan", "mCFP": "cyan", "mTurquoise3": "cyan", "mTFP3": "cyan",
 }
 
-# Colour name → RGB triple (0-1 floats), used when seeding a cell_type's
+# Colour name to RGB triple (0-1 floats), used when seeding a cell_type's
 # default "color" field from a detected reporter.
+
 COLOR_NAME_TO_RGB = {
     "green":  [0.0, 1.0, 0.2],
     "red":    [1.0, 0.1, 0.1],
@@ -107,7 +80,7 @@ def detect_reporter_color(protein_display_id):
     return None
 
 
-# ── Defaults, matching the fallback values generate_script() uses internally ─
+# Defaults, matching the fallback values used internally
 
 DEFAULT_SIMULATION = {
     "max_cells":    10000,
@@ -248,7 +221,7 @@ def prepare_parameters_and_data(sbol_data, overrides=None):
             **DEFAULT_SIGNAL_RATES,
         })
 
-    # Only default signalling "on" if a diffusible signal actually exists —
+    # Only default signalling "on" if a diffusible signal actually exists
     # avoids implying a circuit has quorum sensing etc. when it doesn't.
     parameters["signaling"]["enabled"] = bool(topology["diffusible_signals"])
 
