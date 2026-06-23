@@ -1,20 +1,9 @@
 """
 ui_params.py
-============
+
 Interactive ipywidgets form for building the `parameters` dict consumed by
 `generate_script()` in cellmodeller_converter.py, with first-class support
 for signalling (diffusible chemicals such as AHL in quorum sensing).
-
-Previously this file imported `parse_json`, `analyse_circuit`, and
-`generate_update_logic` from a `json_to_cellmodeller_generator
-.cellmodeller_file_writer` module with a totally different (GRO-era)
-calling convention: per-gene activation/degradation timing widgets, plasmid
-definitions, conjugation rates, point-source signal emitters, NCB
-"emission" widgets, etc. None of that matches what the actual CellModeller
-converter (cellmodeller_converter.py) models, so this is a ground-up
-rewrite targeting exactly the parameters `generate_script()` reads:
-simulation, cell_types, signaling (incl. per-signal diffusion/degradation
-rate), kinetics, and sbol_mapping.
 
 Usage (in a Jupyter notebook):
 
@@ -51,7 +40,7 @@ from params import (
 )
 
 
-# ── small layout helpers ─────────────────────────────────────────────────
+# small layout helpers
 
 def _spacer(width="15px"):
     return widgets.Label(value="", layout=widgets.Layout(width=width))
@@ -79,7 +68,7 @@ def _hex_to_rgb(hex_color):
     return [round(r, 3), round(g, 3), round(b, 3)]
 
 
-# ── main entry point ─────────────────────────────────────────────────────
+# main entry point
 
 def display_form(sbol_data, ignore_component_ids=None):
     """
@@ -122,7 +111,7 @@ def display_form(sbol_data, ignore_component_ids=None):
 
     output_area = widgets.Output()
 
-    # ── Simulation section ────────────────────────────────────────────────
+    # Simulation section
     max_cells_w = widgets.IntText(
         value=DEFAULT_SIMULATION["max_cells"], description="Max cells:",
         style={"description_width": "initial"},
@@ -155,7 +144,7 @@ def display_form(sbol_data, ignore_component_ids=None):
         widgets.HBox([jitter_z_w, _spacer(), use_seed_w, _spacer(), seed_w]),
     )
 
-    # ── Cell types / strains section ──────────────────────────────────────
+    # Cell types / strains section
     cell_type_entries = []
     cell_types_container = widgets.VBox([])
 
@@ -241,7 +230,7 @@ def display_form(sbol_data, ignore_component_ids=None):
     add_strain_btn.on_click(_add_cell_type)
 
     # Seed the first strain, suggesting a colour from a detected reporter
-    # protein (e.g. GFP -> green) so the default already looks right.
+    # protein (e.g. GFP to green) so the default already looks right.
     first_preset = dict(DEFAULT_CELL_TYPE)
     first_preset["display_name"] = "Strain 0"
     for protein in proteins:
@@ -254,7 +243,7 @@ def display_form(sbol_data, ignore_component_ids=None):
 
     cell_types_box = _section("Cell types / strains", add_strain_btn, cell_types_container)
 
-    # ── Kinetics section ──────────────────────────────────────────────────
+    # Kinetics section
     prod_rate_w = widgets.FloatText(
         value=DEFAULT_KINETICS["production_rate"],
         description="Constitutive production rate:", style={"description_width": "initial"},
@@ -292,7 +281,7 @@ def display_form(sbol_data, ignore_component_ids=None):
         widgets.HBox([sig_prod_w]),
     )
 
-    # ── Signalling section ────────────────────────────────────────────────
+    # Signalling section
     sig_enabled_w = widgets.Checkbox(
         value=bool(diffusible_signals),
         description="Enable inter-cell signalling (GridDiffusion)", indent=False,
@@ -310,7 +299,7 @@ def display_form(sbol_data, ignore_component_ids=None):
         description="Boundary:", style={"description_width": "initial"},
     )
 
-    signal_rate_widgets = {}  # signal display_id -> {"diffusion": w, "degradation": w}
+    signal_rate_widgets = {}  # signal display_id: {"diffusion": w, "degradation": w}
 
     if diffusible_signals:
         signal_rows = []
@@ -400,7 +389,7 @@ def display_form(sbol_data, ignore_component_ids=None):
         custom_signals_container,
     )
 
-    # ── sbol_mapping (advanced / optional) ────────────────────────────────
+    # sbol_mapping
     ignore_ids_w = widgets.Text(
         value=", ".join(ignore_component_ids or []),
         description="Ignore component IDs (comma-separated):",
@@ -420,7 +409,7 @@ def display_form(sbol_data, ignore_component_ids=None):
         ),
     )
 
-    # ── Actions: Save / Generate ──────────────────────────────────────────
+    # Actions: Save / Generate
     script_preview_w = widgets.Textarea(
         value="", layout=widgets.Layout(width="100%", height="350px"), disabled=True,
     )
