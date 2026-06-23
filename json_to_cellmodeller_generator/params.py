@@ -86,7 +86,7 @@ DEFAULT_SIMULATION = {
     "max_cells":    10000,
     "jitter_z":     False,
     "gamma":        100.0,
-    "pickle_steps": 50,
+    "pickle_steps": 10,
     "random_seed":  None,
 }
 
