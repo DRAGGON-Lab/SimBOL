@@ -1,5 +1,6 @@
 ## SimBOL: SBOL Designs, Ready for Simulation <a target="_blank" href="https://colab.research.google.com/github/frnvnd4/SimBOL/blob/main/SimBOLs_GRO_Plugin.ipynb?flush_cache=true"> <img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab"/></a>
 
+<a target="_blank"
 href="https://colab.research.google.com/github/frnvnd4/SimBOL/blob/main/SimBOLs_GRO_Plugin.ipynb?flush_cache=true"> <img src="[https://colab.research.google.com/assets/colab-badge.svg](https://colab.research.google.com/drive/1v3NV6Cz5RNTp0xLkVwg4ztZ84HLNHoOI)" alt="Open In Colab"/></a>
 
 
