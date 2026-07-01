@@ -94,19 +94,19 @@ DEFAULT_CELL_TYPE = {
     "display_name":    "Strain 0",
     "color":            [1.0, 0.3, 0.3],
     "division_length":  3.5,
-    "growth_rate":      4.0,
-    "division_noise":   0.5,
+    "growth_rate":      1.0,
+    "division_noise":   0.005,
     "initial_pos":      [0.0, 0.0, 0.0],
     "initial_dir":      [1.0, 0.0, 0.0],
 }
 
 DEFAULT_KINETICS = {
-    "production_rate":        0.05,
-    "max_production_rate":    0.2,
-    "degradation_rate":       0.05,
-    "hill_coefficient":       3.0,
-    "activation_threshold":   0.5,
-    "repression_threshold":   0.5,
+    "production_rate":        2.0,
+    "max_production_rate":    2.0,
+    "degradation_rate":       0.1,
+    "hill_coefficient":       4.0,
+    "activation_threshold":   2.0,
+    "repression_threshold":   2.0,
     "signal_production_rate": 0.1,
 }
 
