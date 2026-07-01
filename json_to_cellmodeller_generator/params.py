@@ -98,6 +98,7 @@ DEFAULT_CELL_TYPE = {
     "division_noise":   0.005,
     "initial_pos":      [0.0, 0.0, 0.0],
     "initial_dir":      [1.0, 0.0, 0.0],
+    "initial_concentrations": {},
 }
 
 DEFAULT_KINETICS = {
