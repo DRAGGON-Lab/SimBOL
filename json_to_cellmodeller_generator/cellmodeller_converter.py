@@ -592,11 +592,17 @@ def generate_script(proteins, modules, interactions, component_map, params,
         len_lines.append(   f"    {i}: {ct.get('division_length', 3.5)},")
         growth_lines.append(f"    {i}: {ct.get('growth_rate', 1.0)},")
         noise_lines.append( f"    {i}: {ct.get('division_noise', 0.005)},")
+        conc = ct.get("initial_concentrations", {})
+        entries = ", ".join(
+            f"'{p['var_name']}': {conc.get(p['display_id'], 0.0)}" for p in proteins
+        )
+        conc_lines.append(f"    {i}: {{{entries}}},  # {label}")
 
     colors_dict = "{\n" + "\n".join(color_lines) + "\n}"
     lens_dict   = "{\n" + "\n".join(len_lines)   + "\n}"
     growth_dict = "{\n" + "\n".join(growth_lines) + "\n}"
     noise_dict  = "{\n" + "\n".join(noise_lines)  + "\n}"
+    conc_dict   = ("{\n" + "\n".join(conc_lines) + "\n}") if proteins else "{}"
 
     # addCell calls 
     add_cell_lines = []
@@ -643,7 +649,9 @@ def generate_script(proteins, modules, interactions, component_map, params,
     # init() protein attributes
     if proteins:
         init_proteins = "    # proteins\n" + "\n".join(
-            f"    cell.{p['var_name']} = 0.0  # {p['display_id']}"
+            f"    cell.{p['var_name']} = "
+            f"cell_initial_concentrations[cell.cellType]['{p['var_name']}']"
+            f"  # {p['display_id']}"
             for p in proteins
         )
         divide_proteins = "\n".join(
@@ -781,6 +789,7 @@ cell_colors          = {colors_dict}
 cell_lens            = {lens_dict}
 cell_growth_rates    = {growth_dict}
 cell_division_noise  = {noise_dict}
+cell_initial_concentrations = {conc_dict}
 
 
 # SETUP
