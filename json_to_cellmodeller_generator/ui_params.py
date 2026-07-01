@@ -190,12 +190,29 @@ def display_form(sbol_data, ignore_component_ids=None):
             description="Remove strain", button_style="danger",
             layout=widgets.Layout(width="130px"),
         )
-
+        
+        conc_widgets = {}
+        conc_row_items = [widgets.Label(value="Initial protein amounts:")]
+        preset_conc = preset.get("initial_concentrations", {})
+        for p in proteins:
+            w = widgets.FloatText(
+                value=preset_conc.get(p["display_id"], 0.0),
+                description=f"{p['display_id']}:",
+                style={"description_width": "initial"},
+                layout=widgets.Layout(width="150px"),
+            )
+            conc_widgets[p["display_id"]] = w
+            conc_row_items.append(w)
+        conc_row = widgets.HBox(conc_row_items)
+        
         row1 = widgets.HBox([index_label, _spacer(), name_w, _spacer(), color_w, _spacer(), remove_btn])
         row2 = widgets.HBox([div_len_w, _spacer(), growth_w, _spacer(), noise_w])
         row3 = widgets.HBox([widgets.Label(value="Initial position:"), pos_x_w, pos_y_w, pos_z_w])
+        rows = [row1, row2, row3]
+        if proteins:
+            rows.append(conc_row)
         box = widgets.VBox(
-            [row1, row2, row3],
+            rows,
             layout=widgets.Layout(border="1px dashed lightgray", margin="5px 0", padding="8px"),
         )
 
@@ -206,6 +223,7 @@ def display_form(sbol_data, ignore_component_ids=None):
                 "name": name_w, "color": color_w, "div_len": div_len_w,
                 "growth": growth_w, "noise": noise_w,
                 "pos_x": pos_x_w, "pos_y": pos_y_w, "pos_z": pos_z_w,
+                "conc": conc_widgets,
             },
         }
 
@@ -441,6 +459,7 @@ def display_form(sbol_data, ignore_component_ids=None):
                 "division_noise": w["noise"].value,
                 "initial_pos": [w["pos_x"].value, w["pos_y"].value, w["pos_z"].value],
                 "initial_dir": [1.0, 0.0, 0.0],
+                "initial_concentrations": {pid: cw.value for pid, cw in w["conc"].items()},
             })
         parameters["cell_types"] = cell_types
 
