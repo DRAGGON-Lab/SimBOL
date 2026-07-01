@@ -544,7 +544,7 @@ def generate_script(proteins, modules, interactions, component_map, params,
     max_cells    = sim_p.get("max_cells",    10000)
     jitter_z     = sim_p.get("jitter_z",     False)
     gamma        = sim_p.get("gamma",        100.0)
-    pickle_steps = sim_p.get("pickle_steps", 50)
+    pickle_steps = sim_p.get("pickle_steps", 10)
     random_seed  = sim_p.get("random_seed",  None)
 
     sig_enabled   = sig_p.get("enabled", False)
@@ -591,7 +591,7 @@ def generate_script(proteins, modules, interactions, component_map, params,
         color_lines.append( f"    {i}: [{c[0]}, {c[1]}, {c[2]}],  # {label}")
         len_lines.append(   f"    {i}: {ct.get('division_length', 3.5)},")
         growth_lines.append(f"    {i}: {ct.get('growth_rate', 1.0)},")
-        noise_lines.append( f"    {i}: {ct.get('division_noise', 0.5)},")
+        noise_lines.append( f"    {i}: {ct.get('division_noise', 0.005)},")
 
     colors_dict = "{\n" + "\n".join(color_lines) + "\n}"
     lens_dict   = "{\n" + "\n".join(len_lines)   + "\n}"
@@ -772,7 +772,7 @@ import random
 # simulation constants
 maxCells = {max_cells}
 gridLen  = {grid_len}   # grid cells per axis
-gridSize = {grid_size}  # µm per grid cell  →  domain = {grid_len * grid_size:.0f} × {grid_len * grid_size:.0f} µm
+gridSize = {grid_size}  # micrometers per grid cell  - domain = {grid_len * grid_size:.0f} × {grid_len * grid_size:.0f} micrometers
 
 
 # cell type lookup tables
