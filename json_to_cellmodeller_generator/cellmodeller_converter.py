@@ -584,7 +584,7 @@ def generate_script(proteins, modules, interactions, component_map, params,
     use_signals  = sig_enabled and n_signals > 0
 
     # Cell type lookup dicts 
-    color_lines, len_lines, growth_lines, noise_lines = [], [], [], []
+    color_lines, len_lines, growth_lines, noise_lines, conc_lines = [], [], [], [], []
     for i, ct in enumerate(cell_types):
         c = ct.get("color", [1.0, 0.3, 0.3])
         label = ct.get("display_name", f"Strain {i}")
