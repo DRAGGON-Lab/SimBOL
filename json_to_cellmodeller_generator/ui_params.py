@@ -310,7 +310,7 @@ def display_form(sbol_data, ignore_component_ids=None):
     )
     grid_z_cells_w = widgets.IntText(
         value=DEFAULT_SIGNALING["grid_z_cells"],
-        description="Grid cells (z — keep small, e.g. 1, for a 2D/monolayer sim):",
+        description="Grid cells (z):",
         style={"description_width": "initial"},
     )
     grid_size_w = widgets.FloatText(
