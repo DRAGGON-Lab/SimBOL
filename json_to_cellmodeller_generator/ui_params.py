@@ -327,8 +327,7 @@ def display_form(sbol_data, ignore_component_ids=None):
     )
     grid_help_w = widgets.HTML(
         value=(
-            "<i>Keep z small (minimum 3, e.g. 3-4) for a 2D/monolayer simulation — "
-            "µm per grid cell must be the same in x, y and z.</i>"
+            "<i>Keep z small for a monolayer simulation.</i>"
         )
     )
 
