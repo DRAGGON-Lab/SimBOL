@@ -125,11 +125,13 @@ DEFAULT_SIGNAL_RATES = {
 DEFAULT_SIGNALING = {
     "enabled":            True,
     "grid_len":           100,
-    # Number of grid cells along z. MUST be >= 2 — GridDiffusion's trilinear
-    # interpolation always reads one cell past the current one on every axis,
-    # so an axis with only 1 cell throws an IndexError at runtime. Use a
-    # small value like 2-4 for a thin/2D-ish simulation, never 1.
-    "grid_z_cells":       2,
+    # Number of grid cells along z. MUST be >= 3 (2 still crashes!) —
+    # CLCrankNicIntegrator always probes the exact grid center at startup,
+    # which lands exactly on a grid-index boundary with an auto-centered
+    # origin; GridDiffusion's interpolation then reads one cell past that,
+    # which is out of bounds for 1 or 2 cells. Use a small value like 3-4
+    # for a thin/2D-ish simulation.
+    "grid_z_cells":       3,
     "grid_size":          4.0,
     # 'grid_origin' is intentionally omitted here — generate_script() will
     # auto-center the grid from grid_len/grid_z_cells/grid_size if it's not

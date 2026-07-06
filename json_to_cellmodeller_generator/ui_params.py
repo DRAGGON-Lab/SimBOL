@@ -310,7 +310,7 @@ def display_form(sbol_data, ignore_component_ids=None):
         layout=widgets.Layout(width="220px"),
     )
     grid_z_cells_w = widgets.BoundedIntText(
-        value=DEFAULT_SIGNALING["grid_z_cells"], min=2, max=1000,
+        value=DEFAULT_SIGNALING["grid_z_cells"], min=3, max=1000,
         description="Grid cells (z):",
         style={"description_width": "initial"},
         layout=widgets.Layout(width="220px"),
@@ -327,7 +327,7 @@ def display_form(sbol_data, ignore_component_ids=None):
     )
     grid_help_w = widgets.HTML(
         value=(
-            "<i>Keep z small (minimum 2, e.g. 2-4) for a 2D/monolayer simulation — "
+            "<i>Keep z small (minimum 3, e.g. 3-4) for a 2D/monolayer simulation — "
             "µm per grid cell must be the same in x, y and z.</i>"
         )
     )

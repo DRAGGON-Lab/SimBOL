@@ -195,8 +195,24 @@ def detect_signaling_topology(proteins, interactions, component_map, ed_chemical
                     if sid in ed_chem_ids:
                         diffusible_signals.add(sid)
 
-    # Proteins that produce a diffusible signal
-    
+    # Proteins that produce a diffusible signal.
+    #
+    # IMPORTANT: the reaction that directly outputs the diffusible signal
+    # (e.g. a Non-Covalent Binding step "LuxR + AHL -> Complex LuxR-AHL")
+    # often does NOT list the true synthesising enzyme as a participant —
+    # that enzyme (e.g. LuxI) sits one hop further back, attached to a
+    # *chemical* reactant (AHL) rather than to the signal itself
+    # ("Precursor AHL --[LuxI]--> AHL" is a separate interaction). A
+    # single-hop lookup misattributes the signal to whichever protein
+    # happens to be a direct reactant/modifier of the *last* reaction,
+    # which is what caused "Complex LuxR-AHL produced by: ['LuxR']"
+    # instead of the correct ['LuxR', 'LuxI'].
+    #
+    # We fix this by walking the reaction graph backwards: for each
+    # diffusible signal, find the reaction(s) that produce it, collect any
+    # protein participants directly, and for any *non-protein chemical*
+    # participants, recurse into the reaction(s) that produce *that*
+    # chemical, and so on.
     reactions_by_product: dict = {}
     for inter in interactions:
         if inter["type"] not in BIOCHEM_REACTION_TYPES:
@@ -261,9 +277,9 @@ def analyse_circuit(proteins, interactions, component_map, ed_chemicals=None):
     Returns
     
     protein_regulation : dict
-        display_id to {promoter, inhibitors, activators, signal_activator}
+        display_id → {promoter, inhibitors, activators, signal_activator}
     promoter_inhibitors : dict
-        promoter_id to [inhibitor protein display_ids]
+        promoter_id → [inhibitor protein display_ids]
     direct_inhibitions : list[(inhibitor_id, inhibited_protein_id)]
     diffusible_signals, signal_producers, signal_activated_promoters
         (see detect_signaling_topology)
@@ -320,6 +336,7 @@ def analyse_circuit(proteins, interactions, component_map, ed_chemicals=None):
             "promoter":          promoter,
             "inhibitors":        promoter_inhibitors.get(promoter, []),
             "activators":        promoter_activators.get(promoter, []),
+            # NEW: diffusible signal that activates this protein's promoter (or None)
             "signal_activator":  signal_activated_promoters.get(promoter),
         }
 
@@ -558,6 +575,17 @@ def generate_color_update(proteins, params, species_index=None):
 
 
 # OPENCL KERNEL GENERATORS (specRateCL / sigRateCL)
+#
+# CellModeller's CLCrankNicIntegrator (the integrator used for grid-based
+# signalling) unconditionally calls regul.specRateCL() and regul.sigRateCL()
+# when it builds its OpenCL program (see CLCrankNicIntegrator.initKernels()
+# in the CellModeller source). If a model file enables signalling but doesn't
+# define these two functions, the simulation crashes immediately with an
+# AttributeError. There is no working Python-only alternative for this
+# integrator — cell-tracked chemical species must live in the per-cell
+# `species[]` array (bound by the integrator to `cell.species`), and their
+# kinetics must be expressed as OpenCL C, not a plain Python per-step loop.
+#
 # Available identifiers inside the C snippets (from CLCrankNicIntegrator.cl):
 #   specRateCL(): gridVolume, area, volume, cellType, rates[], species[], signals[]
 #   sigRateCL() : gridVolume, area, volume, cellType, rates[], species[] (read-only), signals[] (read-only)
@@ -748,9 +776,10 @@ def generate_script(proteins, modules, interactions, component_map, params,
     When signalling is enabled, every tracked protein (plus a pool for each
     diffusible signal that has a detected producer) lives in the per-cell
     `species[]` array, and kinetics are emitted as specRateCL()/sigRateCL()
-    OpenCL C. When signalling is disabled, proteins stay as plain named cell 
-    attributes and kinetics are plain Python in update(), which is simpler 
-    and doesn't need an OpenCL device.
+    OpenCL C — this is required by CLCrankNicIntegrator, not optional. When
+    signalling is disabled, proteins stay as plain named cell attributes and
+    kinetics are plain Python in update(), which is simpler and doesn't need
+    an OpenCL device.
     """
     sim_p      = params.get("simulation",  {})
     cell_types = params.get("cell_types",  [{}])
@@ -764,8 +793,23 @@ def generate_script(proteins, modules, interactions, component_map, params,
     random_seed  = sim_p.get("random_seed",  None)
 
     sig_enabled = sig_p.get("enabled", False)
-    grid_len      = sig_p.get("grid_len",     100)
-    grid_z_cells  = max(2, sig_p.get("grid_z_cells", 2))
+    # grid_len      = number of grid cells along x and y
+    # grid_z_cells  = number of grid cells along z. MUST be >= 3 (not 2!) —
+    #                 CLCrankNicIntegrator.computeGreensFunc() always probes
+    #                 the exact center of the grid domain at startup, and
+    #                 with an auto-centered origin that center lands exactly
+    #                 on a grid-index boundary. GridDiffusion's trilinear
+    #                 interpolation then unconditionally reads one cell past
+    #                 that index — which is out of bounds whenever an axis
+    #                 has only 1 or 2 cells, regardless of grid_size. 3+ is
+    #                 required and sufficient. Use a small value like 3-4 for
+    #                 a thin/2D-ish simulation.
+    # grid_size     = physical size of ONE grid cell in microns. GridDiffusion
+    #                 requires this to be the SAME in x, y and z (it asserts
+    #                 gridSize[0]==gridSize[1]==gridSize[2]) — only the grid
+    #                 *cell counts* can differ per axis, not the cell size.
+    grid_len      = max(3, sig_p.get("grid_len",     100))
+    grid_z_cells  = max(3, sig_p.get("grid_z_cells", 3))
     grid_size     = sig_p.get("grid_size",    4.0)
     grid_origin   = sig_p.get("grid_origin", [
         -grid_len * grid_size / 2.0,
@@ -783,7 +827,13 @@ def generate_script(proteins, modules, interactions, component_map, params,
      diffusible_signals, signal_producers, signal_activated_promoters) = \
         analyse_circuit(proteins, interactions, component_map, ed_chemicals)
 
- 
+    # Merge SBOL-detected signals with any explicitly listed in params.
+    # NOTE: GridDiffusion has no field-wide degradation parameter in the real
+    # CellModeller API — signal is only removed via cell-mediated exchange
+    # (sigRateCL), so there is no "degradation_rate" constructor arg to pass
+    # it. Per-signal "membrane_exchange_rate" controls how fast a cell
+    # exchanges the signal with the grid at its location; it defaults to the
+    # signal's diffusion_rate if not given explicitly.
     param_signal_map = {s["name"]: s for s in sig_p.get("signals", [])}
 
     all_signals = []
