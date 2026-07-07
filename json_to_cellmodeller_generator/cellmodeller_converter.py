@@ -268,6 +268,97 @@ def detect_signaling_topology(proteins, interactions, component_map, ed_chemical
     return diffusible_signals, signal_producers, signal_activated_promoters
 
 
+# EXTERNAL-CHEMICAL SUBSTRATE TRACING
+#
+# `signal_producers` (above) only records *protein* producers of a diffusible
+# signal — any non-protein chemical it passes through on the way (e.g. an
+# enzymatic precursor) is walked through silently and discarded. That hides
+# an important distinction for the `*_CONC` constants generate_script() emits
+# for every non-diffusible ED chemical:
+#
+#   - a chemical that already has an in-model producer (e.g. "AHL", made by
+#     LuxI from a precursor) is already accounted for via signal_producers —
+#     its own _CONC constant has no consumer and setting it does nothing.
+#   - a chemical with NO producer anywhere in the circuit (e.g. a precursor
+#     substrate) is a genuine external input. If a signal's synthesis
+#     pathway depends on one, that pathway should really be gated by it —
+#     otherwise the generated model silently behaves as if the substrate
+#     were unlimited, which is not what the SBOL topology says.
+#
+# find_produced_chemical_ids() and find_signal_substrates() make both facts
+# explicit so generate_script()/generate_specratecl() can (a) wire the
+# genuine substrates into the rate law and (b) annotate every constant with
+# what it actually does, instead of leaving some of them silently inert.
+
+def find_produced_chemical_ids(interactions):
+    """
+    display_ids of ED chemicals that are the Product of some Biochemical
+    Reaction / Production interaction — i.e. synthesised somewhere in this
+    circuit, as opposed to chemicals that only ever appear as inputs.
+    """
+    produced = set()
+    for inter in interactions:
+        if (inter["type"] not in BIOCHEM_REACTION_TYPES
+                and inter["type"] not in PRODUCTION_TYPES):
+            continue
+        for pid in _as_list(inter["participants"].get("Product", "")):
+            if pid:
+                produced.add(pid)
+    return produced
+
+
+def find_signal_substrates(diffusible_signals, interactions, ed_chemicals):
+    """
+    For each diffusible signal, walk its production reaction graph backwards
+    (the same graph `detect_signaling_topology` traces for protein
+    producers) and collect any *chemical* participant that is never the
+    Product of a reaction in this circuit — a genuine external
+    substrate/precursor with no in-model source.
+
+    Returns: dict[str, list[str]] — signal_display_id -> [substrate_display_ids],
+    only for signals that have at least one such substrate.
+    """
+    ed_chem_ids = {c["display_id"] for c in (ed_chemicals or [])}
+
+    reactions_by_product: dict = {}
+    for inter in interactions:
+        if inter["type"] not in BIOCHEM_REACTION_TYPES:
+            continue
+        for pid in _as_list(inter["participants"].get("Product", "")):
+            if pid:
+                reactions_by_product.setdefault(pid, []).append(inter)
+
+    produced_ids = set(reactions_by_product.keys())
+
+    def _trace(chem_id, visited):
+        if chem_id in visited:
+            return []
+        visited.add(chem_id)
+        found = []
+        for inter in reactions_by_product.get(chem_id, []):
+            for role in ("Modifier", "Reactant", "Template"):
+                for mid in _as_list(inter["participants"].get(role, "")):
+                    if mid == chem_id or mid not in ed_chem_ids:
+                        continue  # proteins are already covered by signal_producers
+                    if mid in produced_ids:
+                        found.extend(_trace(mid, visited))
+                    else:
+                        found.append(mid)  # no producer anywhere -> genuine external input
+        seen, ordered = set(), []
+        for f in found:
+            if f not in seen:
+                seen.add(f)
+                ordered.append(f)
+        return ordered
+
+    substrates = {}
+    for sig_id in diffusible_signals:
+        subs = _trace(sig_id, set())
+        if subs:
+            substrates[sig_id] = subs
+    return substrates
+
+
 # CIRCUIT ANALYSIS
 
 def analyse_circuit(proteins, interactions, component_map, ed_chemicals=None):
@@ -604,7 +695,7 @@ def generate_specratecl(proteins, modules, interactions, component_map, params,
                         ed_chemicals, species_index, signal_species_index,
                         signal_index, all_signals, diffusible_signals,
                         signal_producers, signal_activated_promoters,
-                        membrane_rates, signal_prod_rate):
+                        membrane_rates, signal_prod_rate, signal_substrates=None):
     """
     Build the body of specRateCL() — OpenCL C that computes rates[] for every
     tracked intracellular species (proteins + any signal-forming pools).
@@ -614,12 +705,20 @@ def generate_specratecl(proteins, modules, interactions, component_map, params,
     species[i] instead of cell.<var> and signals[i] instead of
     cell.<sig>_sensed.
 
+    `signal_substrates` (see find_signal_substrates()) maps a signal to any
+    external, no-producer chemical(s) its synthesis pathway depends on. Each
+    such substrate gates that signal's production term with a
+    ``{SUBSTRATE_CONC}`` placeholder — the generated specRateCL() is emitted
+    as an f-string, so this is filled in from the module-level *_CONC
+    constant at the top of the generated script every time it's called.
+
     NOTE: "direct" protein-level inhibition (e.g. a small molecule
     sequestering a transcription factor, modelled in the Python path as
     `cell.tgt *= hill_factor` every step) has no clean translation into a
     rate law and is NOT ported here — if your circuit relies on that pattern
     you'll need to hand-write the corresponding ODE term.
     """
+    signal_substrates = signal_substrates or {}
     kin     = params.get("kinetics", {})
     prod_r  = kin.get("production_rate",     0.05)
     max_r   = kin.get("max_production_rate",  0.2)
@@ -711,6 +810,7 @@ def generate_specratecl(proteins, modules, interactions, component_map, params,
             prods = signal_producers.get(sig_id, [])
             gidx  = signal_index[sig_id]
             mrate = membrane_rates.get(sig_id, 0.1)
+            subs  = signal_substrates.get(sig_id, [])
             if prods:
                 prod_expr = " + ".join(f"species[{species_index[p]}]" for p in prods)
                 lines.append(f"    // {sig_id}: produced by {', '.join(prods)}")
@@ -718,6 +818,20 @@ def generate_specratecl(proteins, modules, interactions, component_map, params,
             else:
                 lines.append(f"    // {sig_id}: no producer auto-detected; set manually if needed")
                 production = "0.0f"
+            if subs and prods:
+                # Gate production by external substrate(s) with no in-model
+                # producer (e.g. a precursor LuxI needs to make the signal).
+                # Left at 0.0, the pathway stays off no matter how much
+                # producer protein or how many cells exist — set the
+                # corresponding _CONC constant(s) above to turn it on.
+                substrate_terms = " * ".join(
+                    "{" + f"{safe_name(s).upper()}_CONC" + "}f" for s in subs
+                )
+                lines.append(
+                    f"    // {sig_id}: gated by external substrate(s) {', '.join(subs)}"
+                    f" — set the matching _CONC constant(s) above to activate this pathway"
+                )
+                production = f"({production}) * {substrate_terms}"
             lines.append(
                 f"    rates[{sidx}] = {production} - {deg_r}f * species[{sidx}]"
                 f" - {mrate}f * (species[{sidx}] - signals[{gidx}]) * area / volume;"
@@ -826,6 +940,13 @@ def generate_script(proteins, modules, interactions, component_map, params,
     (_, _, _,
      diffusible_signals, signal_producers, signal_activated_promoters) = \
         analyse_circuit(proteins, interactions, component_map, ed_chemicals)
+
+    # Which non-diffusible ED chemicals are genuine external substrates that
+    # gate a signal's production (see find_signal_substrates' docstring), and
+    # which are already synthesised in-model — needed both for specRateCL
+    # and for annotating the *_CONC constants block below.
+    signal_substrates = find_signal_substrates(diffusible_signals, interactions, ed_chemicals)
+    produced_chem_ids = find_produced_chemical_ids(interactions)
 
     # Merge SBOL-detected signals with any explicitly listed in params.
     # NOTE: GridDiffusion has no field-wide degradation parameter in the real
@@ -960,20 +1081,47 @@ def generate_script(proteins, modules, interactions, component_map, params,
         else "    # tip: set simulation.random_seed in params for reproducibility"
     )
 
-    # External (non-diffusible) chemical constants
+    # External (non-diffusible) chemical constants.
+    #
+    # Every such constant falls into exactly one of three categories, and we
+    # annotate which so a stalled/silent circuit doesn't hide behind an
+    # unused-looking top-of-file constant:
+    #   substrate: genuinely external, no in-model producer, traced as
+    #     feeding a diffusible signal's synthesis -- auto-wired into
+    #     specRateCL as a multiplicative gate (find_signal_substrates).
+    #   produced: has an in-model producer (made by an enzyme from another
+    #     chemical) -- setting this constant does nothing, since nothing in
+    #     the generated kernel reads it.
+    #   unused: not referenced by any interaction at all.
+    chemicals_params = params.get("chemicals", {})
+    substrate_ids = set()
+    for subs in signal_substrates.values():
+        substrate_ids.update(subs)
+
     external_chems = [
         c for c in (ed_chemicals or [])
         if c["display_id"] not in diffusible_signals
     ]
     if external_chems:
+        const_lines = []
+        for c in external_chems:
+            cid = c["display_id"]
+            cname = safe_name(cid).upper() + "_CONC"
+            value = chemicals_params.get(cid, 0.0)
+            if cid in substrate_ids:
+                feeds = sorted(sid for sid, subs in signal_substrates.items() if cid in subs)
+                note = ("substrate -- gates production of " + ", ".join(feeds) +
+                        " in specRateCL; 0.0 keeps that pathway off no matter how many cells exist")
+            elif cid in produced_chem_ids:
+                note = ("produced in-model from another species -- this constant has no "
+                        "effect unless you add exogenous-supplementation kinetics yourself")
+            else:
+                note = "not referenced by any interaction in this circuit -- unused"
+            const_lines.append(cname + " = " + str(value) + "  # " + cid + " (" + c["type"] + ") -- " + note)
         chem_consts = (
             "\n# EXTERNAL CHEMICAL CONCENTRATIONS"
-            "  (non-diffusible inducers — set before running)\n"
-            + "\n".join(
-                f"{safe_name(c['display_id']).upper()}_CONC = 0.0"
-                f"  # {c['display_id']} ({c['type']})"
-                for c in external_chems
-            ) + "\n"
+            "  (non-diffusible inducers -- set before running)\n"
+            + "\n".join(const_lines) + "\n"
         )
     else:
         chem_consts = ""
@@ -1028,7 +1176,7 @@ def generate_script(proteins, modules, interactions, component_map, params,
             proteins, modules, interactions, component_map, params, ed_chemicals,
             species_index, signal_species_index, signal_index, all_signals,
             diffusible_signals, signal_producers, signal_activated_promoters,
-            membrane_rates, signal_prod_rate,
+            membrane_rates, signal_prod_rate, signal_substrates,
         )
         sigratecl_body = generate_sigratecl(signal_species_index, signal_index, membrane_rates)
 
@@ -1038,9 +1186,13 @@ def generate_script(proteins, modules, interactions, component_map, params,
 # specRateCL() sets rates[] for every tracked species (proteins + signal pools).
 # sigRateCL()  sets rates[] for the flux of each signal exchanged with the grid.
 # Available in both: gridVolume, area, volume, cellType, species[], signals[]
+# NOTE: specRateCL() returns an f-string. Any {{CONSTANT_NAME}} placeholder in
+# the body below (e.g. a substrate's *_CONC gate) is evaluated against this
+# script's own module-level globals every time specRateCL() is called -- edit
+# the constants above before running, not this function.
 
 def specRateCL():
-    return \'\'\'
+    return f\'\'\'
 {specratecl_body}
     \'\'\'
 
@@ -1184,11 +1336,17 @@ def main():
     (_, _, _, diffusible_signals, signal_producers, signal_activated_promoters) = \
         analyse_circuit(proteins, interactions, component_map, ed_chemicals)
 
+    signal_substrates = find_signal_substrates(diffusible_signals, interactions, ed_chemicals)
+    produced_chem_ids = find_produced_chemical_ids(interactions)
+
     print(f"  Proteins               : {[p['display_id'] for p in proteins]}")
     print(f"  Chemicals (ED)         : {[c['display_id'] for c in ed_chemicals]}")
     print(f"  Diffusible signals     : {sorted(diffusible_signals)}")
     print(f"  Signal producers       : {signal_producers}")
     print(f"  Signal-active promoters: {signal_activated_promoters}")
+    print(f"  Signal substrates      : {signal_substrates}"
+          f"  (no in-model producer -- gate production if left at 0.0)")
+    print(f"  Produced chemicals     : {sorted(produced_chem_ids)}")
 
     script = generate_script(
         proteins, modules, interactions, component_map, params, ed_chemicals

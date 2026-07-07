@@ -9,6 +9,8 @@ used by the UI form in ui_params.py.
 from cellmodeller_converter import (
     parse_json,
     detect_signaling_topology,
+    find_signal_substrates,
+    find_produced_chemical_ids,
 )
 
 
@@ -122,6 +124,8 @@ DEFAULT_SIGNAL_RATES = {
     "initial_concentration":  0.0,
 }
 
+DEFAULT_CHEMICALS = {}  # display_id -> initial *_CONC value; auto-filled per external chemical
+
 DEFAULT_SIGNALING = {
     "enabled":            True,
     "grid_len":           100,
@@ -155,6 +159,16 @@ def detect_signals(sbol_data, ignore_component_ids=None):
     diffusible_signals, signal_producers, signal_activated_promoters = \
         detect_signaling_topology(proteins, interactions, component_map, ed_chemicals)
 
+    # Which non-diffusible ED chemicals are genuine external substrates that
+    # gate a signal's synthesis (no in-model producer of their own), and
+    # which chemicals ARE produced somewhere in the circuit. Distinguishing
+    # these matters because generate_script() only auto-wires the former --
+    # see cellmodeller_converter.find_signal_substrates for the full story.
+    signal_substrates = find_signal_substrates(
+        diffusible_signals, interactions, ed_chemicals
+    )
+    produced_chemical_ids = find_produced_chemical_ids(interactions)
+
     return {
         "proteins":                   proteins,
         "modules":                    modules,
@@ -164,12 +178,14 @@ def detect_signals(sbol_data, ignore_component_ids=None):
         "diffusible_signals":         diffusible_signals,
         "signal_producers":           signal_producers,
         "signal_activated_promoters": signal_activated_promoters,
+        "signal_substrates":          signal_substrates,
+        "produced_chemical_ids":      produced_chemical_ids,
     }
 
 
 def _deep_merge_parameters(parameters, overrides):
     """Merge a user-supplied `overrides` dict into `parameters`, in place."""
-    for key in ("simulation", "kinetics", "sbol_mapping"):
+    for key in ("simulation", "kinetics", "sbol_mapping", "chemicals"):
         if key in overrides:
             parameters[key].update(overrides[key])
 
@@ -212,7 +228,11 @@ def prepare_parameters_and_data(sbol_data, overrides=None):
                         {"name", "diffusion_rate", "membrane_exchange_rate",
                         "initial_concentration"}, plus optional
                         "grid_z_cells" / "grid_origin"),
-                        "kinetics", "sbol_mapping".
+                        "kinetics", "chemicals" (display_id -> initial
+                        *_CONC value for every non-diffusible ED chemical --
+                        see cellmodeller_converter.find_signal_substrates for
+                        which of those actually affect the generated model),
+                        "sbol_mapping".
 
     Returns:
       tuple:
@@ -230,6 +250,7 @@ def prepare_parameters_and_data(sbol_data, overrides=None):
         "cell_types":   [dict(DEFAULT_CELL_TYPE)],
         "signaling":    {**DEFAULT_SIGNALING, "signals": []},
         "kinetics":     dict(DEFAULT_KINETICS),
+        "chemicals":    dict(DEFAULT_CHEMICALS),
         "sbol_mapping": {"ignore_component_ids": list(ignore_ids)},
     }
 
@@ -241,6 +262,16 @@ def prepare_parameters_and_data(sbol_data, overrides=None):
             "name": sid,
             **DEFAULT_SIGNAL_RATES,
         })
+
+    # One *_CONC entry per non-diffusible external chemical, defaulting to
+    # 0.0, so generate_script() always has an explicit (overridable) value
+    # to emit instead of silently hardcoding 0.0 for every one of them. This
+    # is what lets a UI/override set e.g. a precursor's starting
+    # concentration instead of requiring a hand-edit of the generated file.
+    for chem in topology["ed_chemicals"]:
+        cid = chem["display_id"]
+        if cid not in topology["diffusible_signals"]:
+            parameters["chemicals"].setdefault(cid, 0.0)
 
     # Only default signalling "on" if a diffusible signal actually exists
     # avoids implying a circuit has quorum sensing etc. when it doesn't.

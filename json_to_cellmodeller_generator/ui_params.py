@@ -34,6 +34,7 @@ from params import (
     DEFAULT_KINETICS,
     DEFAULT_SIGNAL_RATES,
     DEFAULT_SIGNALING,
+    DEFAULT_CHEMICALS,
     detect_signals,
     detect_reporter_color,
     COLOR_NAME_TO_RGB,
@@ -97,15 +98,19 @@ def display_form(sbol_data, ignore_component_ids=None):
     """
     topology = detect_signals(sbol_data, ignore_component_ids=ignore_component_ids)
     proteins = topology["proteins"]
+    ed_chemicals = topology["ed_chemicals"]
     diffusible_signals = topology["diffusible_signals"]
     signal_producers = topology["signal_producers"]
     signal_activated_promoters = topology["signal_activated_promoters"]
+    signal_substrates = topology["signal_substrates"]
+    produced_chemical_ids = topology["produced_chemical_ids"]
 
     parameters = {
         "simulation": dict(DEFAULT_SIMULATION),
         "cell_types": [],
         "signaling": {**DEFAULT_SIGNALING, "signals": []},
         "kinetics": dict(DEFAULT_KINETICS),
+        "chemicals": dict(DEFAULT_CHEMICALS),
         "sbol_mapping": {"ignore_component_ids": list(ignore_component_ids or [])},
     }
 
@@ -327,7 +332,8 @@ def display_form(sbol_data, ignore_component_ids=None):
     )
     grid_help_w = widgets.HTML(
         value=(
-            "<i>Keep z small for a monolayer simulation.</i>"
+            "<i>Keep z small (minimum 3, e.g. 3-4) for a 2D/monolayer simulation — "
+            "µm per grid cell must be the same in x, y and z.</i>"
         )
     )
 
@@ -423,6 +429,53 @@ def display_form(sbol_data, ignore_component_ids=None):
         custom_signals_container,
     )
 
+    # External chemicals section — one FloatText per non-diffusible ED
+    # chemical, labelled with what setting it actually does (see
+    # cellmodeller_converter.find_signal_substrates): a "substrate" gates a
+    # signal's production in specRateCL if left at 0.0; a "produced"
+    # chemical already has an in-model source and setting it has no effect;
+    # an "unused" one isn't referenced by any interaction at all.
+    substrate_ids = set()
+    for subs in signal_substrates.values():
+        substrate_ids.update(subs)
+
+    chemical_widgets = {}
+    external_chemicals = [
+        c for c in ed_chemicals if c["display_id"] not in diffusible_signals
+    ]
+    if external_chemicals:
+        chem_rows = []
+        for c in external_chemicals:
+            cid = c["display_id"]
+            if cid in substrate_ids:
+                feeds = sorted(sid for sid, subs in signal_substrates.items() if cid in subs)
+                info = (f"<b>{cid}</b> — substrate: gates production of "
+                        f"{', '.join(feeds)}; 0.0 keeps that pathway off "
+                        f"regardless of cell count")
+            elif cid in produced_chemical_ids:
+                info = (f"<b>{cid}</b> — produced in-model from another species; "
+                        f"this value has no effect on the generated kernel")
+            else:
+                info = f"<b>{cid}</b> — not referenced by any interaction; unused"
+            conc_w = widgets.FloatText(
+                value=DEFAULT_CHEMICALS.get(cid, 0.0),
+                description="Initial conc.:",
+                style={"description_width": "initial"},
+                layout=widgets.Layout(width="200px"),
+            )
+            row = widgets.VBox(
+                [widgets.HTML(value=info), conc_w],
+                layout=widgets.Layout(border="1px dashed lightgray", margin="5px 0", padding="8px"),
+            )
+            chem_rows.append(row)
+            chemical_widgets[cid] = conc_w
+        chemicals_box = _section("External chemicals", widgets.VBox(chem_rows))
+    else:
+        chemicals_box = _section(
+            "External chemicals",
+            widgets.HTML(value="<i>No non-diffusible ED chemicals detected in this circuit.</i>"),
+        )
+
     # sbol_mapping
     ignore_ids_w = widgets.Text(
         value=", ".join(ignore_component_ids or []),
@@ -515,6 +568,8 @@ def display_form(sbol_data, ignore_component_ids=None):
         }
 
         parameters["sbol_mapping"] = {"ignore_component_ids": _current_ignore_ids()}
+
+        parameters["chemicals"] = {cid: w.value for cid, w in chemical_widgets.items()}
         return parameters
 
     def _on_save(_btn):
@@ -576,7 +631,7 @@ def display_form(sbol_data, ignore_component_ids=None):
 
     form = widgets.VBox([
         simulation_box, cell_types_box, kinetics_box, signaling_box,
-        advanced_box, actions_box,
+        chemicals_box, advanced_box, actions_box,
     ])
     display(form)
 
