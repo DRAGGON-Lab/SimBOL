@@ -623,9 +623,9 @@ def display_form(sbol_data, ignore_component_ids=None):
         }
 
         parameters["walls"] = [
-            {"point": [w["px"].value, w["py"].value, w["pz"].value],
-             "normal": [w["nx"].value, w["ny"].value, w["nz"].value],
-             "coeff": w["coeff"].value}
+            {"point": [w["widgets"]["px"].value, w["widgets"]["py"].value, w["widgets"]["pz"].value],
+             "normal": [w["widgets"]["nx"].value, w["widgets"]["ny"].value, w["widgets"]["nz"].value],
+             "coeff": w["widgets"]["coeff"].value}
             for w in wall_entries
         ]
 
