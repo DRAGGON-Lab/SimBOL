@@ -906,9 +906,16 @@ def generate_script(proteins, modules, interactions, component_map, params,
     pickle_steps = sim_p.get("pickle_steps", 10)
     random_seed  = sim_p.get("random_seed",  None)
 
+    walls = params.get("walls", [])
+    wall_lines = "\n".join(
+        f"    biophys.addPlane(({w['point'][0]}, {w['point'][1]}, {w['point'][2]}), "
+        f"({w['normal'][0]}, {w['normal'][1]}, {w['normal'][2]}), {w.get('coeff', 1.0)})"
+        for w in walls
+    )
+
     sig_enabled = sig_p.get("enabled", False)
     # grid_len      = number of grid cells along x and y
-    # grid_z_cells  = number of grid cells along z. MUST be >= 3 (not 2!) —
+    # grid_z_cells  = number of grid cells along z.
     #                 CLCrankNicIntegrator.computeGreensFunc() always probes
     #                 the exact center of the grid domain at startup, and
     #                 with an auto-centered origin that center lands exactly
@@ -1116,7 +1123,7 @@ def generate_script(proteins, modules, interactions, component_map, params,
                 note = ("produced in-model from another species -- this constant has no "
                         "effect unless you add exogenous-supplementation kinetics yourself")
             else:
-                note = "not referenced by any interaction in this circuit -- unused"
+                note = "external chemical"
             const_lines.append(cname + " = " + str(value) + "  # " + cid + " (" + c["type"] + ") -- " + note)
         chem_consts = (
             "\n# EXTERNAL CHEMICAL CONCENTRATIONS"
@@ -1270,8 +1277,10 @@ def setup(sim):
         sim,
         jitter_z={jitter_z},
         max_cells=maxCells,
+        max_planes={max(len(walls), 1)},
         gamma={gamma}
     )
+    {wall_lines}
     regul = ModuleRegulator(sim, sim.moduleName)
 
 {sig_init}
