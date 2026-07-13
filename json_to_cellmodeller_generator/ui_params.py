@@ -542,6 +542,13 @@ def display_form(sbol_data, ignore_component_ids=None):
             "signal_production_rate": sig_prod_w.value,
         }
 
+        parameters["walls"] = [
+            {"point": [w["px"].value, w["py"].value, w["pz"].value],
+             "normal": [w["nx"].value, w["ny"].value, w["nz"].value],
+             "coeff": w["coeff"].value}
+            for w in wall_entries
+        ]
+
         signals = []
         for sid, rw in signal_rate_widgets.items():
             signals.append({
