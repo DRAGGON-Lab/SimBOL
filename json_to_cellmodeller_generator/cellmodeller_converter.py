@@ -1280,7 +1280,7 @@ def setup(sim):
         max_planes={max(len(walls), 1)},
         gamma={gamma}
     )
-    {wall_lines}
+{wall_lines}
     regul = ModuleRegulator(sim, sim.moduleName)
 
 {sig_init}
