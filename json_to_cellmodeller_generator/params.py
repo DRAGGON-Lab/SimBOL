@@ -144,6 +144,8 @@ DEFAULT_SIGNALING = {
     "boundary_condition": "reflect",
 }
 
+DEFAULT_WALLS = []  # list of {"point": [x,y,z], "normal": [nx,ny,nz], "coeff": 1.0}
+
 
 def detect_signals(sbol_data, ignore_component_ids=None):
     """
@@ -207,6 +209,9 @@ def _deep_merge_parameters(parameters, overrides):
                 else:
                     parameters["signaling"]["signals"].append(dict(s_over))
 
+    if "walls" in overrides:
+        parameters["walls"] = overrides["walls"]
+
 
 def prepare_parameters_and_data(sbol_data, overrides=None):
     """
@@ -252,6 +257,7 @@ def prepare_parameters_and_data(sbol_data, overrides=None):
         "kinetics":     dict(DEFAULT_KINETICS),
         "chemicals":    dict(DEFAULT_CHEMICALS),
         "sbol_mapping": {"ignore_component_ids": list(ignore_ids)},
+        "walls": list(DEFAULT_WALLS),
     }
 
     # One signal entry per auto-detected diffusible signal, so
