@@ -111,6 +111,7 @@ def display_form(sbol_data, ignore_component_ids=None):
         "signaling": {**DEFAULT_SIGNALING, "signals": []},
         "kinetics": dict(DEFAULT_KINETICS),
         "chemicals": dict(DEFAULT_CHEMICALS),
+        "walls": [],
         "sbol_mapping": {"ignore_component_ids": list(ignore_component_ids or [])},
     }
 
@@ -304,6 +305,85 @@ def display_form(sbol_data, ignore_component_ids=None):
         widgets.HBox([sig_prod_w]),
     )
 
+    # Walls section — static reflecting planes (point + outward normal)
+    wall_entries = []
+    walls_container = widgets.VBox([])
+
+    def _refresh_walls():
+        walls_container.children = tuple(e["box"] for e in wall_entries)
+        for i, e in enumerate(wall_entries):
+            e["index_label"].value = f"<b>Wall {i}</b>"
+
+    def _make_wall_box(preset=None):
+        preset = preset or {}
+        point = preset.get("point", [0.0, 0.0, 0.0])
+        normal = preset.get("normal", [0.0, 0.0, 1.0])
+        coeff = preset.get("coeff", 1.0)
+
+        index_label = widgets.HTML(value="<b>Wall</b>")
+        px_w = widgets.FloatText(value=point[0], description="Point X:",
+                                  style={"description_width": "initial"}, layout=widgets.Layout(width="120px"))
+        py_w = widgets.FloatText(value=point[1], description="Y:",
+                                  style={"description_width": "initial"}, layout=widgets.Layout(width="100px"))
+        pz_w = widgets.FloatText(value=point[2], description="Z:",
+                                  style={"description_width": "initial"}, layout=widgets.Layout(width="100px"))
+        nx_w = widgets.FloatText(value=normal[0], description="Normal X:",
+                                  style={"description_width": "initial"}, layout=widgets.Layout(width="120px"))
+        ny_w = widgets.FloatText(value=normal[1], description="Y:",
+                                  style={"description_width": "initial"}, layout=widgets.Layout(width="100px"))
+        nz_w = widgets.FloatText(value=normal[2], description="Z:",
+                                  style={"description_width": "initial"}, layout=widgets.Layout(width="100px"))
+        coeff_w = widgets.FloatText(value=coeff, description="Reflection coeff:",
+                                     style={"description_width": "initial"}, layout=widgets.Layout(width="160px"))
+        remove_btn = widgets.Button(description="Remove wall", button_style="danger",
+                                     layout=widgets.Layout(width="120px"))
+
+        row1 = widgets.HBox([index_label, _spacer(), remove_btn])
+        row2 = widgets.HBox([widgets.Label(value="Point on plane:"), px_w, py_w, pz_w])
+        row3 = widgets.HBox([widgets.Label(value="Outward normal:"), nx_w, ny_w, nz_w, _spacer(), coeff_w])
+        box = widgets.VBox(
+            [row1, row2, row3],
+            layout=widgets.Layout(border="1px dashed lightgray", margin="5px 0", padding="8px"),
+        )
+
+        entry = {
+            "box": box,
+            "index_label": index_label,
+            "widgets": {
+                "px": px_w, "py": py_w, "pz": pz_w,
+                "nx": nx_w, "ny": ny_w, "nz": nz_w,
+                "coeff": coeff_w,
+            },
+        }
+
+        def _on_remove(_btn):
+            if entry in wall_entries:
+                wall_entries.remove(entry)
+                _refresh_walls()
+
+        remove_btn.on_click(_on_remove)
+        return entry
+
+    def _add_wall(_btn=None, preset=None):
+        wall_entries.append(_make_wall_box(preset=preset))
+        _refresh_walls()
+
+    add_wall_btn = widgets.Button(description="Add wall", layout=widgets.Layout(width="120px"))
+    add_wall_btn.on_click(_add_wall)
+
+    walls_box = _section(
+        "Walls (static reflecting planes)",
+        widgets.HTML(
+            value=(
+                "<i>Each wall is an infinite plane defined by a point on the "
+                "plane and its outward-facing normal vector — cells are "
+                "reflected off it. Leave empty for an unbounded simulation.</i>"
+            )
+        ),
+        add_wall_btn,
+        walls_container,
+    )
+    
     # Signalling section
     sig_enabled_w = widgets.Checkbox(
         value=bool(diffusible_signals),
@@ -638,7 +718,7 @@ def display_form(sbol_data, ignore_component_ids=None):
 
     form = widgets.VBox([
         simulation_box, cell_types_box, kinetics_box, signaling_box,
-        chemicals_box, advanced_box, actions_box,
+        walls_box, chemicals_box, advanced_box, actions_box,
     ])
     display(form)
 
