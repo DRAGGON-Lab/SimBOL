@@ -936,9 +936,21 @@ def generate_script(proteins, modules, interactions, component_map, params,
     for subs in signal_substrates.values():
         substrate_ids.update(subs)
 
+    # FIX: a chemical must only be left out of the _CONC constants block
+    # when it is actually sampled from signals[] in the generated kernel.
+    # That only happens when signaling is enabled (use_signals). If the
+    # user disables signaling (e.g. via the ui_params.py checkbox) while a
+    # chemical is still topologically diffusible (detected via an
+    # Inhibitor/Stimulator edge, per detect_signaling_topology), the script
+    # falls back to the plain-Python update() path, which references that
+    # chemical's *_CONC constant directly (see generate_update_logic's
+    # direct_inhibitions handling) — so the constant must still be emitted
+    # here, or the generated script will contain an undefined name.
+    active_signal_names = diffusible_signals if use_signals else set()
+
     external_chems = [
         c for c in (ed_chemicals or [])
-        if c["display_id"] not in diffusible_signals
+        if c["display_id"] not in active_signal_names
     ]
     if external_chems:
         const_lines = []
