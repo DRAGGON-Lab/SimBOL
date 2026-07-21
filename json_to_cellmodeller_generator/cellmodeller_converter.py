@@ -23,7 +23,6 @@ BIOCHEM_REACTION_TYPES = {"Biochemical Reaction", "Non-Covalent Binding", "Contr
 
 
 # FLUORESCENT PROTEIN COLOUR LOOKUP
-# Keyword (substring of display_id, lowercased) → (R, G, B)
 _FP_KEYWORDS = {
     "gfp":        (0.0, 1.0, 0.2),
     "egfp":       (0.0, 1.0, 0.2),
@@ -48,78 +47,86 @@ _FP_KEYWORDS = {
     "morange":    (1.0, 0.5, 0.0),
 }
 
-# Common BioBrick registry IDs → (R, G, B)
 _FP_BIOBRICK = {
-    "BBa_E0040": (0.0, 1.0, 0.2),  # GFP
+    "BBa_E0040": (0.0, 1.0, 0.2),
     "BBa_K2148009": (0.0, 1.0, 0.2),
     "BBa_K2560042": (0.0, 1.0, 0.2),
     "BBa_K4946001": (0.0, 1.0, 0.2),
-    "BBa_E1010": (1.0, 0.1, 0.1),  # RFP
+    "BBa_E1010": (1.0, 0.1, 0.1),
     "BBa_K1323009": (1.0, 0.1, 0.1),
     "BBa_K3128008": (1.0, 0.1, 0.1),
-    "BBa_E0020": (0.1, 0.8, 1.0),  # CFP
-    "BBa_E0030": (0.9, 0.9, 0.0),  # YFP
+    "BBa_E0020": (0.1, 0.8, 1.0),
+    "BBa_E0030": (0.9, 0.9, 0.0),
     "BBa_K592101": (0.9, 0.9, 0.0),
     "BBa_K3427000": (0.9, 0.9, 0.0),
 }
 
 
-# HELPERS 
-
 def _as_list(val):
-    """Normalise a participants value (string or list) to a list."""
     if not val:
         return []
     return val if isinstance(val, list) else [val]
 
 
 def safe_name(s):
-    """Convert any display-ID to a safe Python identifier."""
     name = (s.replace("-", "_")
              .replace(".", "_")
              .replace(" ", "_")
              .replace("(", "_")
              .replace(")", "_")
              .lower())
-    # Identifiers can't start with a digit — common for real signal names
-    # like "3OC6HSL" / "3OC12HSL", which would otherwise produce invalid
-    # syntax such as `cell.3oc6hsl_sensed = 0.0`.
     if name and name[0].isdigit():
         name = "_" + name
     return name
 
 
 def _first(val):
-    """Return first element if list, else the value itself."""
     return val[0] if isinstance(val, list) else val
 
 
-# PARSER
-
 def parse_json(sbol_data, ignore_ids=None):
-    """
-    Parse SBOL JSON into five structures:
-
-        proteins      — ED entries with type 'Protein'
-        modules       — hierarchy entries with constitutive flag
-        interactions  — normalised list (same-role participants → list)
-        component_map — displayId → role (DNA parts etc.)
-        ed_chemicals  — non-protein ED entities (small molecules, complexes …)
-    """
     ignore_ids = set(ignore_ids or [])
 
+    # component_map is used downstream ONLY to tell "this Inhibition/
+    # Stimulation targets a DNA regulatory element (promoter-level,
+    # hierarchical)" apart from "this targets a molecular species
+    # (protein-level, direct)". It must therefore only ever contain DNA
+    # parts (promoters, RBS, CDS, terminators, and DNA-typed Engineered-
+    # Regions/transcription units) — NOT proteins or chemicals, even though
+    # the real SBOL export (sbol_to_json.py) lists all of those together
+    # under "components". Including protein/chemical entries here would
+    # make analyse_circuit() misclassify a direct protein-level inhibition
+    # (e.g. IPTG -| LacI) as a promoter-level one whenever the inhibited
+    # participant also happens to appear in "components".
     component_map = {
         c["displayId"]: c.get("role", "Unknown")
         for c in sbol_data.get("components", [])
         if c["displayId"] not in ignore_ids
+        and c.get("type", "Unknown").lower() == "dna"
     }
+
+    # Real SBOL exports (see sbol_to_json.py) put every entity — DNA parts
+    # *and* proteins/chemicals/complexes — into "components", typed via
+    # sbol:type, and leave "ED" empty; "ED" is a legacy/alternate shape
+    # (external molecular-species list, disjoint from "components") that
+    # some hand-built JSON fixtures use instead. Support both: prefer "ED"
+    # when it's populated, otherwise classify straight out of "components".
+    ed_source = sbol_data.get("ED", [])
+    if not ed_source:
+        _non_molecular_types = {"dna", "functional entity"}
+        ed_source = [
+            {"displayId": c["displayId"], "name": c["displayId"], "type": c.get("type", "Unknown")}
+            for c in sbol_data.get("components", [])
+            if c["displayId"] not in ignore_ids
+            and c.get("type", "Unknown").lower() not in _non_molecular_types
+        ]
 
     proteins = [
         {
             "display_id": ed.get("name", ed.get("displayId", "")),
             "var_name":   safe_name(ed.get("name", ed.get("displayId", ""))),
         }
-        for ed in sbol_data.get("ED", [])
+        for ed in ed_source
         if ed.get("type", "").lower() == "protein"
     ]
 
@@ -129,7 +136,7 @@ def parse_json(sbol_data, ignore_ids=None):
             "var_name":   safe_name(ed.get("name", ed.get("displayId", ""))),
             "type":       ed.get("type", "Unknown"),
         }
-        for ed in sbol_data.get("ED", [])
+        for ed in ed_source
         if ed.get("type", "").lower() != "protein"
     ]
 
@@ -163,30 +170,9 @@ def parse_json(sbol_data, ignore_ids=None):
 # SIGNAL TOPOLOGY DETECTION
 
 def detect_signaling_topology(proteins, interactions, component_map, ed_chemicals):
-    """
-    Auto-detect the three intercellular-signalling facts from SBOL topology.
-
-    Returns
-   
-    diffusible_signals : set[str]
-        display_ids of ED chemicals that appear as Stimulator in any
-        Stimulation interaction.  These are the molecules that GridDiffusion
-        will diffuse across the colony (e.g. AHL).
-
-    signal_producers : dict[str, list[str]]
-        signal_display_id → [protein_display_ids] that synthesise it.
-        Detected from Biochemical Reaction / Non-Covalent Binding interactions
-        where the product is a diffusible signal (e.g. LuxI → AHL).
-
-    signal_activated_promoters : dict[str, str]
-        promoter_displayId → signal_display_id.
-        Promoters whose Stimulated target is driven by a chemical Stimulator
-        (e.g. BBa_R0062 activated by AHL or LuxR-AHL complex).
-    """
     protein_ids  = {p["display_id"] for p in proteins}
     ed_chem_ids  = {c["display_id"] for c in (ed_chemicals or [])}
 
-    # Chemicals that appear as Stimulator
     diffusible_signals: set = set()
     for inter in interactions:
         if inter["type"] in STIMULATION_TYPES:
@@ -195,24 +181,6 @@ def detect_signaling_topology(proteins, interactions, component_map, ed_chemical
                     if sid in ed_chem_ids:
                         diffusible_signals.add(sid)
 
-    # Proteins that produce a diffusible signal.
-    #
-    # IMPORTANT: the reaction that directly outputs the diffusible signal
-    # (e.g. a Non-Covalent Binding step "LuxR + AHL -> Complex LuxR-AHL")
-    # often does NOT list the true synthesising enzyme as a participant —
-    # that enzyme (e.g. LuxI) sits one hop further back, attached to a
-    # *chemical* reactant (AHL) rather than to the signal itself
-    # ("Precursor AHL --[LuxI]--> AHL" is a separate interaction). A
-    # single-hop lookup misattributes the signal to whichever protein
-    # happens to be a direct reactant/modifier of the *last* reaction,
-    # which is what caused "Complex LuxR-AHL produced by: ['LuxR']"
-    # instead of the correct ['LuxR', 'LuxI'].
-    #
-    # We fix this by walking the reaction graph backwards: for each
-    # diffusible signal, find the reaction(s) that produce it, collect any
-    # protein participants directly, and for any *non-protein chemical*
-    # participants, recurse into the reaction(s) that produce *that*
-    # chemical, and so on.
     reactions_by_product: dict = {}
     for inter in interactions:
         if inter["type"] not in BIOCHEM_REACTION_TYPES:
@@ -235,9 +203,7 @@ def detect_signaling_topology(proteins, interactions, component_map, ed_chemical
                     if mid in protein_ids:
                         found.append(mid)
                     elif mid in ed_chem_ids and mid != chem_id:
-                        # Non-protein reactant — chase its own producer(s)
                         found.extend(_trace_producers(mid, visited))
-        # de-duplicate, preserve discovery order
         seen, ordered = set(), []
         for f in found:
             if f not in seen:
@@ -251,7 +217,6 @@ def detect_signaling_topology(proteins, interactions, component_map, ed_chemical
         if prods:
             signal_producers[sig_id] = prods
 
-    # Promoters activated by a diffusible signal
     signal_activated_promoters: dict = {}
     for inter in interactions:
         if inter["type"] in STIMULATION_TYPES:
@@ -268,34 +233,7 @@ def detect_signaling_topology(proteins, interactions, component_map, ed_chemical
     return diffusible_signals, signal_producers, signal_activated_promoters
 
 
-# EXTERNAL-CHEMICAL SUBSTRATE TRACING
-#
-# `signal_producers` (above) only records *protein* producers of a diffusible
-# signal — any non-protein chemical it passes through on the way (e.g. an
-# enzymatic precursor) is walked through silently and discarded. That hides
-# an important distinction for the `*_CONC` constants generate_script() emits
-# for every non-diffusible ED chemical:
-#
-#   - a chemical that already has an in-model producer (e.g. "AHL", made by
-#     LuxI from a precursor) is already accounted for via signal_producers —
-#     its own _CONC constant has no consumer and setting it does nothing.
-#   - a chemical with NO producer anywhere in the circuit (e.g. a precursor
-#     substrate) is a genuine external input. If a signal's synthesis
-#     pathway depends on one, that pathway should really be gated by it —
-#     otherwise the generated model silently behaves as if the substrate
-#     were unlimited, which is not what the SBOL topology says.
-#
-# find_produced_chemical_ids() and find_signal_substrates() make both facts
-# explicit so generate_script()/generate_specratecl() can (a) wire the
-# genuine substrates into the rate law and (b) annotate every constant with
-# what it actually does, instead of leaving some of them silently inert.
-
 def find_produced_chemical_ids(interactions):
-    """
-    display_ids of ED chemicals that are the Product of some Biochemical
-    Reaction / Production interaction — i.e. synthesised somewhere in this
-    circuit, as opposed to chemicals that only ever appear as inputs.
-    """
     produced = set()
     for inter in interactions:
         if (inter["type"] not in BIOCHEM_REACTION_TYPES
@@ -308,16 +246,6 @@ def find_produced_chemical_ids(interactions):
 
 
 def find_signal_substrates(diffusible_signals, interactions, ed_chemicals):
-    """
-    For each diffusible signal, walk its production reaction graph backwards
-    (the same graph `detect_signaling_topology` traces for protein
-    producers) and collect any *chemical* participant that is never the
-    Product of a reaction in this circuit — a genuine external
-    substrate/precursor with no in-model source.
-
-    Returns: dict[str, list[str]] — signal_display_id -> [substrate_display_ids],
-    only for signals that have at least one such substrate.
-    """
     ed_chem_ids = {c["display_id"] for c in (ed_chemicals or [])}
 
     reactions_by_product: dict = {}
@@ -339,11 +267,11 @@ def find_signal_substrates(diffusible_signals, interactions, ed_chemicals):
             for role in ("Modifier", "Reactant", "Template"):
                 for mid in _as_list(inter["participants"].get(role, "")):
                     if mid == chem_id or mid not in ed_chem_ids:
-                        continue  # proteins are already covered by signal_producers
+                        continue
                     if mid in produced_ids:
                         found.extend(_trace(mid, visited))
                     else:
-                        found.append(mid)  # no producer anywhere -> genuine external input
+                        found.append(mid)
         seen, ordered = set(), []
         for f in found:
             if f not in seen:
@@ -362,32 +290,32 @@ def find_signal_substrates(diffusible_signals, interactions, ed_chemicals):
 # CIRCUIT ANALYSIS
 
 def analyse_circuit(proteins, interactions, component_map, ed_chemicals=None):
-    """
-    Build complete regulatory lookup tables, including signal topology.
-
-    Returns
-    
-    protein_regulation : dict
-        display_id → {promoter, inhibitors, activators, signal_activator}
-    promoter_inhibitors : dict
-        promoter_id → [inhibitor protein display_ids]
-    direct_inhibitions : list[(inhibitor_id, inhibited_protein_id)]
-    diffusible_signals, signal_producers, signal_activated_promoters
-        (see detect_signaling_topology)
-    """
     protein_names = {p["display_id"]: p["var_name"] for p in proteins}
     protein_ids   = set(protein_names)
     ed_chem_ids   = {c["display_id"] for c in (ed_chemicals or [])}
 
-    # Detect signal topology first
     diffusible_signals, signal_producers, signal_activated_promoters = \
         detect_signaling_topology(proteins, interactions, component_map, ed_chemicals)
 
-    # promoter to protein (from Production interactions)
+    # promoter to protein (from Production interactions).
+    #
+    # FIX: real SBOL genetic-production interactions commonly use the
+    # standard SBO "template" participant role (SBO:0000645) attached to
+    # the whole transcription unit / Engineered-Region, rather than a
+    # "Promoter" role attached to just the bare promoter feature — that's
+    # exactly what sbol_to_json.py emits (see YES_gate_system Interaction1/
+    # Interaction2: role "Template", participant "TU_LacI"/"TU_RFP"). The
+    # original code only ever looked for "Promoter" and silently produced
+    # an empty promoter_id for every protein, which meant NO inhibition/
+    # activation was ever attached to anything downstream. Falling back to
+    # "Template" fixes that without breaking JSON that *does* use
+    # "Promoter" explicitly (Promoter is tried first).
     protein_promoter: dict = {}
     for inter in interactions:
         if inter["type"] in PRODUCTION_TYPES:
-            promoter_id = _first(inter["participants"].get("Promoter", ""))
+            promoter_id = _first(
+                inter["participants"].get(
+                    "Promoter", inter["participants"].get("Template", "")))
             product_id  = _first(inter["participants"].get("Product",  ""))
             if promoter_id and product_id:
                 protein_promoter[product_id] = promoter_id
@@ -414,7 +342,6 @@ def analyse_circuit(proteins, interactions, component_map, ed_chemicals=None):
             for act_id in _as_list(
                     inter["participants"].get(
                         "Activator", inter["participants"].get("Stimulator", ""))):
-                # Only protein activators here; chemical ones are in signal_activated_promoters
                 if act_id in protein_ids:
                     promoter_activators.setdefault(activated_id, []).append(act_id)
 
@@ -427,11 +354,10 @@ def analyse_circuit(proteins, interactions, component_map, ed_chemicals=None):
             "promoter":          promoter,
             "inhibitors":        promoter_inhibitors.get(promoter, []),
             "activators":        promoter_activators.get(promoter, []),
-            # NEW: diffusible signal that activates this protein's promoter (or None)
             "signal_activator":  signal_activated_promoters.get(promoter),
         }
 
-    # direct protein-level inhibitions (e.g. aTc to TetR) 
+    # direct protein-level inhibitions (e.g. IPTG sequestering LacI) 
     direct_inhibitions = []
     for inter in interactions:
         if inter["type"] in INHIBITION_TYPES:
@@ -446,6 +372,33 @@ def analyse_circuit(proteins, interactions, component_map, ed_chemicals=None):
 
 # MODULE HELPER
 
+def _flatten_module_component_ids(components):
+    """
+    module["components"] can be a flat list of DNA-part ids (simple JSON
+    fixtures) OR the nested SBOL-derived shape — a list of {name: [...]}
+    dicts whose values are themselves ids or further nested dicts (see
+    sbol_to_json.py's hierarchy output, e.g. {"YES_gate_system": [{"TU_LacI":
+    [...]}, ...]}). find_controlling_module() needs a flat set of every id
+    that appears anywhere in that structure, at any depth, to correctly
+    test containment either way.
+    """
+    flat = set()
+
+    def _walk(node):
+        if isinstance(node, str):
+            flat.add(node)
+        elif isinstance(node, dict):
+            for key, val in node.items():
+                flat.add(key)
+                _walk(val)
+        elif isinstance(node, list):
+            for item in node:
+                _walk(item)
+
+    _walk(components)
+    return flat
+
+
 def find_controlling_module(protein_display_id, modules, interactions):
     """Return the module dict that contains the promoter driving this protein."""
     for inter in interactions:
@@ -453,9 +406,11 @@ def find_controlling_module(protein_display_id, modules, interactions):
             continue
         if _first(inter["participants"].get("Product", "")) != protein_display_id:
             continue
-        promoter_id = _first(inter["participants"].get("Promoter", ""))
+        promoter_id = _first(
+            inter["participants"].get(
+                "Promoter", inter["participants"].get("Template", "")))
         for module in modules:
-            if promoter_id in module["components"]:
+            if promoter_id in _flatten_module_component_ids(module["components"]):
                 return module
     return None
 
@@ -464,13 +419,6 @@ def find_controlling_module(protein_display_id, modules, interactions):
 
 def generate_update_logic(proteins, modules, interactions, component_map, params,
                           ed_chemicals=None):
-    """
-    Generate the body of update() — all lines are indented for the
-    ``for id, cell in cells.items():`` loop (8 spaces).
-
-    Signal-activated proteins read ``cell.<signal>_sensed``, which is written
-    by signalRates() each timestep so there is only a 1-step delay.
-    """
     kin     = params.get("kinetics", {})
     prod_r  = kin.get("production_rate",     0.05)
     max_r   = kin.get("max_production_rate",  0.2)
@@ -488,7 +436,6 @@ def generate_update_logic(proteins, modules, interactions, component_map, params
 
     lines = []
 
-    # Pre-compute inhibition Hill factors (one per repressed promoter, reused by every protein sharing that promoter)
     repressed_promoters = sorted(promoter_inhibitors)
     if repressed_promoters:
         lines.append("        # — inhibition factors —")
@@ -514,7 +461,6 @@ def generate_update_logic(proteins, modules, interactions, component_map, params
                 )
         lines.append("")
 
-    # Per-protein production + degradation
     lines.append("        # — protein production and degradation —")
     for protein in proteins:
         pid         = protein["display_id"]
@@ -523,13 +469,12 @@ def generate_update_logic(proteins, modules, interactions, component_map, params
         promoter    = reg.get("promoter", "")
         inhibitors  = reg.get("inhibitors", [])
         activators  = reg.get("activators", [])
-        signal_act  = reg.get("signal_activator")   # e.g. "AHL", or None
+        signal_act  = reg.get("signal_activator")
 
         module          = find_controlling_module(pid, modules, interactions)
         is_constitutive = module["constitutive"] if module else False
 
         if inhibitors and signal_act:
-            # Combined: signal activates AND protein represses
             fvar      = f"_inh_{safe_name(promoter)}"
             sensed    = f"cell.{safe_name(signal_act)}_sensed"
             act_local = f"_act_{safe_name(promoter)}"
@@ -556,7 +501,6 @@ def generate_update_logic(proteins, modules, interactions, component_map, params
             )
 
         elif signal_act:
-            # Activated by diffusible signal — reads cell.<sig>_sensed from signalRates()
             sensed    = f"cell.{safe_name(signal_act)}_sensed"
             act_local = f"_act_{safe_name(promoter) or safe_name(pid)}"
             lines.append(
@@ -595,7 +539,6 @@ def generate_update_logic(proteins, modules, interactions, component_map, params
         lines.append(f"        cell.{var} = max(0.0, cell.{var})")
         lines.append("")
 
-    # Direct protein-level inhibitions (e.g. external small molecule sequesters a TF)
     for inhibitor_id, inhibited_id in direct_inhibitions:
         tgt = protein_names.get(inhibited_id, safe_name(inhibited_id))
         if inhibitor_id in ed_chem_ids:
@@ -624,25 +567,15 @@ def generate_update_logic(proteins, modules, interactions, component_map, params
 # COLOR UPDATE HELPER 
 
 def generate_color_update(proteins, params, species_index=None):
-    """
-    Return 8-space-indented lines to colour cells by FP expression level,
-    or None if no fluorescent protein is detected.
-    Interpolates from dark-grey (no expression) to full FP colour (saturation).
-
-    If species_index is given (signalling/CL mode), reads from
-    cell.species[idx] instead of the named attribute cell.<var>.
-    """
     rep_thr = params.get("kinetics", {}).get("repression_threshold", 0.5)
 
     for protein in proteins:
         pid = protein["display_id"]
         var = protein["var_name"]
 
-        # Exact BioBrick ID match
         if pid in _FP_BIOBRICK:
             r, g, b = _FP_BIOBRICK[pid]
         else:
-            # Keyword substring match (case-insensitive)
             pid_lower = pid.lower()
             matched = next(
                 (col for kw, col in _FP_KEYWORDS.items() if kw in pid_lower), None
@@ -666,28 +599,12 @@ def generate_color_update(proteins, params, species_index=None):
 
 
 # OPENCL KERNEL GENERATORS (specRateCL / sigRateCL)
-#
-# CellModeller's CLCrankNicIntegrator (the integrator used for grid-based
-# signalling) unconditionally calls regul.specRateCL() and regul.sigRateCL()
-# when it builds its OpenCL program (see CLCrankNicIntegrator.initKernels()
-# in the CellModeller source). If a model file enables signalling but doesn't
-# define these two functions, the simulation crashes immediately with an
-# AttributeError. There is no working Python-only alternative for this
-# integrator — cell-tracked chemical species must live in the per-cell
-# `species[]` array (bound by the integrator to `cell.species`), and their
-# kinetics must be expressed as OpenCL C, not a plain Python per-step loop.
-#
-# Available identifiers inside the C snippets (from CLCrankNicIntegrator.cl):
-#   specRateCL(): gridVolume, area, volume, cellType, rates[], species[], signals[]
-#   sigRateCL() : gridVolume, area, volume, cellType, rates[], species[] (read-only), signals[] (read-only)
 
 def _c_hill(x_expr, thr, n):
-    """Standard activating-Hill-function C expression."""
     return f"pow({x_expr}, {n}f) / (pow({thr}f, {n}f) + pow({x_expr}, {n}f))"
 
 
 def _c_rep(x_expr, thr, n):
-    """Standard repressing-Hill-function C expression."""
     return f"pow({thr}f, {n}f) / (pow({thr}f, {n}f) + pow({x_expr}, {n}f))"
 
 
@@ -696,28 +613,6 @@ def generate_specratecl(proteins, modules, interactions, component_map, params,
                         signal_index, all_signals, diffusible_signals,
                         signal_producers, signal_activated_promoters,
                         membrane_rates, signal_prod_rate, signal_substrates=None):
-    """
-    Build the body of specRateCL() — OpenCL C that computes rates[] for every
-    tracked intracellular species (proteins + any signal-forming pools).
-
-    Mirrors generate_update_logic()'s branches (constitutive / inhibited /
-    activated / signal-activated / combined) but in C, referencing
-    species[i] instead of cell.<var> and signals[i] instead of
-    cell.<sig>_sensed.
-
-    `signal_substrates` (see find_signal_substrates()) maps a signal to any
-    external, no-producer chemical(s) its synthesis pathway depends on. Each
-    such substrate gates that signal's production term with a
-    ``{SUBSTRATE_CONC}`` placeholder — the generated specRateCL() is emitted
-    as an f-string, so this is filled in from the module-level *_CONC
-    constant at the top of the generated script every time it's called.
-
-    NOTE: "direct" protein-level inhibition (e.g. a small molecule
-    sequestering a transcription factor, modelled in the Python path as
-    `cell.tgt *= hill_factor` every step) has no clean translation into a
-    rate law and is NOT ported here — if your circuit relies on that pattern
-    you'll need to hand-write the corresponding ODE term.
-    """
     signal_substrates = signal_substrates or {}
     kin     = params.get("kinetics", {})
     prod_r  = kin.get("production_rate",     0.05)
@@ -735,7 +630,6 @@ def generate_specratecl(proteins, modules, interactions, component_map, params,
 
     lines = []
 
-    # Shared inhibition factors (one per repressed promoter)
     repressed_promoters = sorted(promoter_inhibitors)
     if repressed_promoters:
         lines.append("    // — inhibition factors —")
@@ -752,7 +646,6 @@ def generate_specratecl(proteins, modules, interactions, component_map, params,
             )
         lines.append("")
 
-    # Per-protein production + degradation
     lines.append("    // — protein production and degradation —")
     for protein in proteins:
         pid   = protein["display_id"]
@@ -802,8 +695,6 @@ def generate_specratecl(proteins, modules, interactions, component_map, params,
             lines.append(f"    rates[{species_index[pid]}] = {prod_r}f - {deg_r}f * {sref};")
         lines.append("")
 
-    # Signal-forming species (e.g. the AHL/complex pool tracked intracellularly
-    # so it has something to exchange with the extracellular grid)
     if signal_species_index:
         lines.append("    // — diffusible-signal pools (produced here, exchanged with grid in sigRateCL) —")
         for sig_id, sidx in signal_species_index.items():
@@ -819,11 +710,6 @@ def generate_specratecl(proteins, modules, interactions, component_map, params,
                 lines.append(f"    // {sig_id}: no producer auto-detected; set manually if needed")
                 production = "0.0f"
             if subs and prods:
-                # Gate production by external substrate(s) with no in-model
-                # producer (e.g. a precursor LuxI needs to make the signal).
-                # Left at 0.0, the pathway stays off no matter how much
-                # producer protein or how many cells exist — set the
-                # corresponding _CONC constant(s) above to turn it on.
                 substrate_terms = " * ".join(
                     "{" + f"{safe_name(s).upper()}_CONC" + "}f" for s in subs
                 )
@@ -842,12 +728,6 @@ def generate_specratecl(proteins, modules, interactions, component_map, params,
 
 
 def generate_sigratecl(signal_species_index, signal_index, membrane_rates):
-    """
-    Build the body of sigRateCL() — the flux of each diffusible signal
-    exchanged between a cell and the extracellular grid at its location.
-    Mirrors (with opposite sign / volume normalisation) the exchange term
-    used in specRateCL, so what leaves a cell enters the grid and vice versa.
-    """
     if not signal_species_index:
         return "    // no diffusible signals with a tracked producer"
     lines = []
@@ -863,13 +743,10 @@ def generate_sigratecl(signal_species_index, signal_index, membrane_rates):
 
 # SCRIPT ASSEMBLER
 
-# scipy.ndimage boundary-mode strings actually accepted by
-# CLCrankNicIntegrator's `boundcond` kwarg (verified against the CellModeller
-# source — NOT 'cyclic' and NOT an integer boundaryType flag).
 _BOUNDCOND_MAP = {
     "reflect":    "reflect",
     "reflecting": "reflect",
-    "fixed":      "constant",   # Dirichlet-like: boundary held at 0 (or initLevels)
+    "fixed":      "constant",
     "constant":   "constant",
     "periodic":   "wrap",
     "cyclic":     "wrap",
@@ -881,20 +758,6 @@ _BOUNDCOND_MAP = {
 
 def generate_script(proteins, modules, interactions, component_map, params,
                     ed_chemicals=None):
-    """
-    Assemble a complete, runnable CellModeller Python script.
-
-    Signalling topology (which signal diffuses, who emits it, what it activates)
-    is auto-detected from SBOL.  All numerical rates are taken from *params*.
-
-    When signalling is enabled, every tracked protein (plus a pool for each
-    diffusible signal that has a detected producer) lives in the per-cell
-    `species[]` array, and kinetics are emitted as specRateCL()/sigRateCL()
-    OpenCL C — this is required by CLCrankNicIntegrator, not optional. When
-    signalling is disabled, proteins stay as plain named cell attributes and
-    kinetics are plain Python in update(), which is simpler and doesn't need
-    an OpenCL device.
-    """
     sim_p      = params.get("simulation",  {})
     cell_types = params.get("cell_types",  [{}])
     sig_p      = params.get("signaling",   {})
@@ -914,21 +777,6 @@ def generate_script(proteins, modules, interactions, component_map, params,
     )
 
     sig_enabled = sig_p.get("enabled", False)
-    # grid_len      = number of grid cells along x and y
-    # grid_z_cells  = number of grid cells along z.
-    #                 CLCrankNicIntegrator.computeGreensFunc() always probes
-    #                 the exact center of the grid domain at startup, and
-    #                 with an auto-centered origin that center lands exactly
-    #                 on a grid-index boundary. GridDiffusion's trilinear
-    #                 interpolation then unconditionally reads one cell past
-    #                 that index — which is out of bounds whenever an axis
-    #                 has only 1 or 2 cells, regardless of grid_size. 3+ is
-    #                 required and sufficient. Use a small value like 3-4 for
-    #                 a thin/2D-ish simulation.
-    # grid_size     = physical size of ONE grid cell in microns. GridDiffusion
-    #                 requires this to be the SAME in x, y and z (it asserts
-    #                 gridSize[0]==gridSize[1]==gridSize[2]) — only the grid
-    #                 *cell counts* can differ per axis, not the cell size.
     grid_len      = max(3, sig_p.get("grid_len",     100))
     grid_z_cells  = max(3, sig_p.get("grid_z_cells", 3))
     grid_size     = sig_p.get("grid_size",    4.0)
@@ -943,25 +791,13 @@ def generate_script(proteins, modules, interactions, component_map, params,
     signal_prod_rate = kin.get("signal_production_rate", 0.1)
     deg_r            = kin.get("degradation_rate", 0.01)
 
-    # Resolve signals
     (_, _, _,
      diffusible_signals, signal_producers, signal_activated_promoters) = \
         analyse_circuit(proteins, interactions, component_map, ed_chemicals)
 
-    # Which non-diffusible ED chemicals are genuine external substrates that
-    # gate a signal's production (see find_signal_substrates' docstring), and
-    # which are already synthesised in-model — needed both for specRateCL
-    # and for annotating the *_CONC constants block below.
     signal_substrates = find_signal_substrates(diffusible_signals, interactions, ed_chemicals)
     produced_chem_ids = find_produced_chemical_ids(interactions)
 
-    # Merge SBOL-detected signals with any explicitly listed in params.
-    # NOTE: GridDiffusion has no field-wide degradation parameter in the real
-    # CellModeller API — signal is only removed via cell-mediated exchange
-    # (sigRateCL), so there is no "degradation_rate" constructor arg to pass
-    # it. Per-signal "membrane_exchange_rate" controls how fast a cell
-    # exchanges the signal with the grid at its location; it defaults to the
-    # signal's diffusion_rate if not given explicitly.
     param_signal_map = {s["name"]: s for s in sig_p.get("signals", [])}
 
     all_signals = []
@@ -974,7 +810,6 @@ def generate_script(proteins, modules, interactions, component_map, params,
             "membrane_exchange_rate": entry.get("membrane_exchange_rate", diff_rate),
             "initial_concentration":  entry.get("initial_concentration", 0.0),
         })
-    # Any param-listed signals not found in SBOL topology are included manually
     for name, s in param_signal_map.items():
         if name not in diffusible_signals:
             diff_rate = s.get("diffusion_rate", 0.1)
@@ -990,10 +825,6 @@ def generate_script(proteins, modules, interactions, component_map, params,
     n_signals       = len(all_signals)
     use_signals     = sig_enabled and n_signals > 0 and len(proteins) > 0
 
-    # Species index: every protein gets a slot; every diffusible signal that
-    # has a detected producer ALSO gets its own slot (an intracellular pool
-    # that gets produced from its producer protein(s) and exchanged with the
-    # grid) — it is a separate thing from the producer protein itself.
     species_index        = {}
     signal_species_index  = {}
     if use_signals:
@@ -1005,12 +836,9 @@ def generate_script(proteins, modules, interactions, component_map, params,
                 signal_species_index[sid] = next_idx
                 next_idx += 1
         n_species = next_idx
-        # A signal with no producer can't be tracked/exchanged meaningfully —
-        # fall back cleanly rather than emit a kernel that references nothing.
         if n_species == len(proteins) and not signal_species_index:
-            pass  # still fine — proteins alone are tracked
+            pass
 
-    # Cell type lookup dicts 
     color_lines, len_lines, growth_lines, noise_lines, conc_lines = [], [], [], [], []
     for i, ct in enumerate(cell_types):
         c = ct.get("color", [1.0, 0.3, 0.3])
@@ -1031,7 +859,6 @@ def generate_script(proteins, modules, interactions, component_map, params,
     noise_dict  = "{\n" + "\n".join(noise_lines)  + "\n}"
     conc_dict   = ("{\n" + "\n".join(conc_lines) + "\n}") if proteins else "{}"
 
-    # addCell calls 
     add_cell_lines = []
     for i, ct in enumerate(cell_types):
         pos = ct.get("initial_pos", [0.0, float(i) * 3.0, 0.0])
@@ -1043,7 +870,6 @@ def generate_script(proteins, modules, interactions, component_map, params,
         )
     add_cells_str = "\n".join(add_cell_lines)
 
-    # Signalling setup block
     if use_signals:
         n_species = len(species_index) + len(signal_species_index)
         diff_rates = [str(s["diffusion_rate"]) for s in all_signals]
@@ -1073,33 +899,17 @@ def generate_script(proteins, modules, interactions, component_map, params,
         sig_import2   = "# from CellModeller.Integration.CLCrankNicIntegrator import CLCrankNicIntegrator"
         sig_init      = "    # Signalling disabled — set signaling.enabled=true in params to activate"
         sim_init_call = "    sim.init(biophys, regul, None, None)"
-        # No GridDiffusion in play — skip the z/origin constants that only
-        # matter for it, but keep gridLen/gridSize for backward compatibility
-        # (harmless if unused, and some setups reuse them for other things).
         grid_constants_block = (
             f"gridLen  = {grid_len}   # grid cells per axis\n"
             f"gridSize = {grid_size}  # µm per grid cell"
         )
 
-    # random seed 
     random_seed_line = (
         f"    random.seed({random_seed})"
         if random_seed is not None
         else "    # tip: set simulation.random_seed in params for reproducibility"
     )
 
-    # External (non-diffusible) chemical constants.
-    #
-    # Every such constant falls into exactly one of three categories, and we
-    # annotate which so a stalled/silent circuit doesn't hide behind an
-    # unused-looking top-of-file constant:
-    #   substrate: genuinely external, no in-model producer, traced as
-    #     feeding a diffusible signal's synthesis -- auto-wired into
-    #     specRateCL as a multiplicative gate (find_signal_substrates).
-    #   produced: has an in-model producer (made by an enzyme from another
-    #     chemical) -- setting this constant does nothing, since nothing in
-    #     the generated kernel reads it.
-    #   unused: not referenced by any interaction at all.
     chemicals_params = params.get("chemicals", {})
     substrate_ids = set()
     for subs in signal_substrates.values():
@@ -1133,7 +943,6 @@ def generate_script(proteins, modules, interactions, component_map, params,
     else:
         chem_consts = ""
 
-    # Topology comment block
     if diffusible_signals or signal_producers or signal_activated_promoters:
         topo_lines = ["# AUTO-DETECTED SIGNAL TOPOLOGY"]
         if diffusible_signals:
@@ -1152,7 +961,6 @@ def generate_script(proteins, modules, interactions, component_map, params,
     color_update_str = ("\n" + color_update_raw + "\n") if color_update_raw else ""
 
     if use_signals:
-        # — species[] based path —
         init_proteins = (
             "    # proteins + signal pools, all tracked via cell.species[]\n"
             "    cell.species[:] = [\n"
@@ -1177,7 +985,7 @@ def generate_script(proteins, modules, interactions, component_map, params,
             f"\n    # locally-sensed extracellular signal levels\n"
             f"    cell.signals[:] = [0.0] * {n_signals}"
         )
-        divide_signals = ""  # cell.signals is rebuilt by the integrator on division
+        divide_signals = ""
 
         specratecl_body = generate_specratecl(
             proteins, modules, interactions, component_map, params, ed_chemicals,
@@ -1190,13 +998,6 @@ def generate_script(proteins, modules, interactions, component_map, params,
         cl_functions = f'''
 
 # SPEC / SIGNAL RATES (OpenCL C — required by CLCrankNicIntegrator)
-# specRateCL() sets rates[] for every tracked species (proteins + signal pools).
-# sigRateCL()  sets rates[] for the flux of each signal exchanged with the grid.
-# Available in both: gridVolume, area, volume, cellType, species[], signals[]
-# NOTE: specRateCL() returns an f-string. Any {{CONSTANT_NAME}} placeholder in
-# the body below (e.g. a substrate's *_CONC gate) is evaluated against this
-# script's own module-level globals every time specRateCL() is called -- edit
-# the constants above before running, not this function.
 
 def specRateCL():
     return f\'\'\'
@@ -1208,9 +1009,8 @@ def sigRateCL():
 {sigratecl_body}
     \'\'\'
 '''
-        update_logic = ""  # protein kinetics now live in specRateCL, not update()
+        update_logic = ""
     else:
-        # — plain-Python named-attribute path (unchanged, no CL device needed) —
         if proteins:
             init_proteins = "    # proteins\n" + "\n".join(
                 f"    cell.{p['var_name']} = "
@@ -1233,7 +1033,6 @@ def sigRateCL():
             proteins, modules, interactions, component_map, params, ed_chemicals
         )
 
-    # Assemble
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     update_block = (
         f"\n{update_logic}\n" if update_logic else ""
@@ -1242,8 +1041,6 @@ def sigRateCL():
 # CellModeller simulation script
 # Generated : {now}
 # Converter : json_to_cellmodeller.py
-# Topology (who produces what signal, what it activates) is auto-detected from
-# the SBOL JSON.  All numerical rates are defined in the params file / dict.
 {"# NOTE: signalling is ON — protein/signal kinetics live in specRateCL(), not update()." if use_signals else ""}
 
 
