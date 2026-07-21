@@ -87,17 +87,6 @@ def _first(val):
 def parse_json(sbol_data, ignore_ids=None):
     ignore_ids = set(ignore_ids or [])
 
-    # component_map is used downstream ONLY to tell "this Inhibition/
-    # Stimulation targets a DNA regulatory element (promoter-level,
-    # hierarchical)" apart from "this targets a molecular species
-    # (protein-level, direct)". It must therefore only ever contain DNA
-    # parts (promoters, RBS, CDS, terminators, and DNA-typed Engineered-
-    # Regions/transcription units) — NOT proteins or chemicals, even though
-    # the real SBOL export (sbol_to_json.py) lists all of those together
-    # under "components". Including protein/chemical entries here would
-    # make analyse_circuit() misclassify a direct protein-level inhibition
-    # (e.g. IPTG -| LacI) as a promoter-level one whenever the inhibited
-    # participant also happens to appear in "components".
     component_map = {
         c["displayId"]: c.get("role", "Unknown")
         for c in sbol_data.get("components", [])
@@ -105,12 +94,6 @@ def parse_json(sbol_data, ignore_ids=None):
         and c.get("type", "Unknown").lower() == "dna"
     }
 
-    # Real SBOL exports (see sbol_to_json.py) put every entity — DNA parts
-    # *and* proteins/chemicals/complexes — into "components", typed via
-    # sbol:type, and leave "ED" empty; "ED" is a legacy/alternate shape
-    # (external molecular-species list, disjoint from "components") that
-    # some hand-built JSON fixtures use instead. Support both: prefer "ED"
-    # when it's populated, otherwise classify straight out of "components".
     ed_source = sbol_data.get("ED", [])
     if not ed_source:
         _non_molecular_types = {"dna", "functional entity"}
@@ -180,6 +163,17 @@ def detect_signaling_topology(proteins, interactions, component_map, ed_chemical
                 for sid in _as_list(inter["participants"].get(role, "")):
                     if sid in ed_chem_ids:
                         diffusible_signals.add(sid)
+        elif inter["type"] in INHIBITION_TYPES:
+            # FIX (bug 1): a diffusible small molecule can also act as a
+            # direct INHIBITOR of a protein (e.g. IPTG -| LacI). The
+            # original code only ever looked at Stimulation/Activation
+            # participants, so any circuit where the sole role of the
+            # external chemical is inhibitory (like this YES gate) never
+            # got flagged as diffusible at all, and silently fell back to
+            # a frozen constant instead of a real diffusion grid.
+            for sid in _as_list(inter["participants"].get("Inhibitor", "")):
+                if sid in ed_chem_ids:
+                    diffusible_signals.add(sid)
 
     reactions_by_product: dict = {}
     for inter in interactions:
@@ -297,19 +291,6 @@ def analyse_circuit(proteins, interactions, component_map, ed_chemicals=None):
     diffusible_signals, signal_producers, signal_activated_promoters = \
         detect_signaling_topology(proteins, interactions, component_map, ed_chemicals)
 
-    # promoter to protein (from Production interactions).
-    #
-    # FIX: real SBOL genetic-production interactions commonly use the
-    # standard SBO "template" participant role (SBO:0000645) attached to
-    # the whole transcription unit / Engineered-Region, rather than a
-    # "Promoter" role attached to just the bare promoter feature — that's
-    # exactly what sbol_to_json.py emits (see YES_gate_system Interaction1/
-    # Interaction2: role "Template", participant "TU_LacI"/"TU_RFP"). The
-    # original code only ever looked for "Promoter" and silently produced
-    # an empty promoter_id for every protein, which meant NO inhibition/
-    # activation was ever attached to anything downstream. Falling back to
-    # "Template" fixes that without breaking JSON that *does* use
-    # "Promoter" explicitly (Promoter is tried first).
     protein_promoter: dict = {}
     for inter in interactions:
         if inter["type"] in PRODUCTION_TYPES:
@@ -320,7 +301,6 @@ def analyse_circuit(proteins, interactions, component_map, ed_chemicals=None):
             if promoter_id and product_id:
                 protein_promoter[product_id] = promoter_id
 
-    # promoter to inhibitors / activators 
     promoter_inhibitors: dict = {}
     promoter_activators: dict = {}
 
@@ -345,7 +325,6 @@ def analyse_circuit(proteins, interactions, component_map, ed_chemicals=None):
                 if act_id in protein_ids:
                     promoter_activators.setdefault(activated_id, []).append(act_id)
 
-    # per-protein regulation summary 
     protein_regulation: dict = {}
     for protein in proteins:
         pid      = protein["display_id"]
@@ -357,7 +336,7 @@ def analyse_circuit(proteins, interactions, component_map, ed_chemicals=None):
             "signal_activator":  signal_activated_promoters.get(promoter),
         }
 
-    # direct protein-level inhibitions (e.g. IPTG sequestering LacI) 
+    # direct protein-level inhibitions (e.g. IPTG sequestering LacI)
     direct_inhibitions = []
     for inter in interactions:
         if inter["type"] in INHIBITION_TYPES:
@@ -373,15 +352,6 @@ def analyse_circuit(proteins, interactions, component_map, ed_chemicals=None):
 # MODULE HELPER
 
 def _flatten_module_component_ids(components):
-    """
-    module["components"] can be a flat list of DNA-part ids (simple JSON
-    fixtures) OR the nested SBOL-derived shape — a list of {name: [...]}
-    dicts whose values are themselves ids or further nested dicts (see
-    sbol_to_json.py's hierarchy output, e.g. {"YES_gate_system": [{"TU_LacI":
-    [...]}, ...]}). find_controlling_module() needs a flat set of every id
-    that appears anywhere in that structure, at any depth, to correctly
-    test containment either way.
-    """
     flat = set()
 
     def _walk(node):
@@ -400,7 +370,6 @@ def _flatten_module_component_ids(components):
 
 
 def find_controlling_module(protein_display_id, modules, interactions):
-    """Return the module dict that contains the promoter driving this protein."""
     for inter in interactions:
         if inter["type"] not in PRODUCTION_TYPES:
             continue
@@ -436,25 +405,64 @@ def generate_update_logic(proteins, modules, interactions, component_map, params
 
     lines = []
 
+    # FIX (bug 3, python/update() path): direct chemical inhibition of a
+    # protein (e.g. IPTG -| LacI) must be modelled as a fast, REVERSIBLE
+    # pre-equilibrium titration that produces a derived "active" pool used
+    # only where that protein acts as a repressor — it must NOT permanently
+    # multiply into (and thereby destroy) the real state variable, or the
+    # protein pool irreversibly collapses to ~0 and never recovers even if
+    # the inducer is later removed. Computed BEFORE the promoter-inhibition
+    # block below so the active (not raw) pool feeds downstream repression.
+    direct_active_var = {}
+    if direct_inhibitions:
+        lines.append("        # — direct (protein-level) inhibitions: fast reversible titration —")
+        for inhibitor_id, inhibited_id in direct_inhibitions:
+            tgt = protein_names.get(inhibited_id, safe_name(inhibited_id))
+            active_var = f"_active_{tgt}"
+            if inhibitor_id in ed_chem_ids:
+                cname = f"{safe_name(inhibitor_id).upper()}_CONC"
+                lines.append(
+                    f"        # {inhibitor_id} (external) sequesters {inhibited_id}: "
+                    f"active fraction only, real pool untouched"
+                )
+                lines.append(
+                    f"        {active_var} = cell.{tgt} / "
+                    f"(1.0 + ({cname} / {act_thr})**{hill_n})"
+                )
+            else:
+                iv = protein_names.get(inhibitor_id, safe_name(inhibitor_id))
+                lines.append(
+                    f"        # {inhibitor_id} sequesters {inhibited_id}: "
+                    f"active fraction only, real pool untouched"
+                )
+                lines.append(
+                    f"        {active_var} = cell.{tgt} / "
+                    f"(1.0 + (cell.{iv} / {act_thr})**{hill_n})"
+                )
+            direct_active_var[inhibited_id] = active_var
+        lines.append("")
+
     repressed_promoters = sorted(promoter_inhibitors)
     if repressed_promoters:
         lines.append("        # — inhibition factors —")
         for prom in repressed_promoters:
             inhibitors = promoter_inhibitors[prom]
             fvar = f"_inh_{safe_name(prom)}"
+
+            def _term(iid):
+                if iid in direct_active_var:
+                    expr = direct_active_var[iid]
+                else:
+                    expr = f"cell.{protein_names.get(iid, safe_name(iid))}"
+                return f"({rep_thr}**{hill_n} / ({rep_thr}**{hill_n} + {expr}**{hill_n}))"
+
             if len(inhibitors) == 1:
-                iv = protein_names.get(inhibitors[0], safe_name(inhibitors[0]))
                 lines.append(
-                    f"        {fvar} = {rep_thr}**{hill_n} / "
-                    f"({rep_thr}**{hill_n} + cell.{iv}**{hill_n})"
+                    f"        {fvar} = {_term(inhibitors[0])[1:-1]}"
                     f"  # {inhibitors[0]} represses {prom}"
                 )
             else:
-                parts = [
-                    f"({rep_thr}**{hill_n} / ({rep_thr}**{hill_n} + "
-                    f"cell.{protein_names.get(iid, safe_name(iid))}**{hill_n}))"
-                    for iid in inhibitors
-                ]
+                parts = [_term(iid) for iid in inhibitors]
                 lines.append(
                     f"        {fvar} = {' * '.join(parts)}"
                     f"  # {', '.join(inhibitors)} repress {prom}"
@@ -539,29 +547,7 @@ def generate_update_logic(proteins, modules, interactions, component_map, params
         lines.append(f"        cell.{var} = max(0.0, cell.{var})")
         lines.append("")
 
-    for inhibitor_id, inhibited_id in direct_inhibitions:
-        tgt = protein_names.get(inhibited_id, safe_name(inhibited_id))
-        if inhibitor_id in ed_chem_ids:
-            cname = f"{safe_name(inhibitor_id).upper()}_CONC"
-            lines.append(
-                f"        # Direct inhibition: {inhibitor_id} (external) → {inhibited_id}"
-            )
-            lines.append(
-                f"        cell.{tgt} *= {rep_thr}**{hill_n} / "
-                f"({rep_thr}**{hill_n} + {cname}**{hill_n})"
-            )
-        else:
-            iv = protein_names.get(inhibitor_id, safe_name(inhibitor_id))
-            lines.append(
-                f"        # Direct inhibition: {inhibitor_id} → {inhibited_id}"
-            )
-            lines.append(
-                f"        cell.{tgt} *= {rep_thr}**{hill_n} / "
-                f"({rep_thr}**{hill_n} + cell.{iv}**{hill_n})"
-            )
-        lines.append("")
-
-    return "\n".join(lines) if lines else "        pass"
+    return "\n".join(lines) if lines else "        pass", direct_active_var
 
 
 # COLOR UPDATE HELPER 
@@ -623,12 +609,44 @@ def generate_specratecl(proteins, modules, interactions, component_map, params,
     rep_thr = kin.get("repression_threshold", 0.5)
 
     protein_names = {p["display_id"]: p["var_name"] for p in proteins}
+    ed_chem_ids   = {c["display_id"] for c in (ed_chemicals or [])}
 
-    (protein_regulation, promoter_inhibitors, _direct_inhibitions,
+    (protein_regulation, promoter_inhibitors, direct_inhibitions,
      _diffusible_signals, _signal_producers, _signal_activated_promoters) = \
         analyse_circuit(proteins, interactions, component_map, ed_chemicals)
 
     lines = []
+
+    # FIX (bug 2 + bug 3, OpenCL path): direct_inhibitions was previously
+    # computed but discarded (bound to _direct_inhibitions and never used),
+    # so a diffusible inhibitor like IPTG never reduced the *active* pool of
+    # its target protein in the GPU kernel at all — the gate was disconnected.
+    # We now emit a derived "active" fraction per directly-inhibited protein
+    # (fast reversible titration, real species[] pool left untouched by the
+    # inhibitor), computed BEFORE the promoter-inhibition block below so
+    # that active (not raw) pool feeds downstream repression terms.
+    direct_active_var = {}
+    if direct_inhibitions:
+        lines.append("    // — direct (protein-level) inhibitions: fast reversible titration —")
+        for inhibitor_id, inhibited_id in direct_inhibitions:
+            sref = f"species[{species_index[inhibited_id]}]"
+            active_var = f"_active_{safe_name(inhibited_id)}"
+            if inhibitor_id in ed_chem_ids:
+                if inhibitor_id in signal_index:
+                    inh_expr = f"signals[{signal_index[inhibitor_id]}]"
+                    lines.append(f"    // {inhibitor_id}: diffusible, sampled from grid")
+                else:
+                    inh_expr = f"{safe_name(inhibitor_id).upper()}_CONC"
+                    lines.append(f"    // {inhibitor_id}: external constant")
+            else:
+                inh_expr = f"species[{species_index[inhibitor_id]}]"
+            lines.append(
+                f"    float {active_var} = {sref} / "
+                f"(1.0f + pow({inh_expr} / {act_thr}f, {hill_n}f));"
+                f"  // {inhibitor_id} sequesters {inhibited_id} (reversible, real pool untouched)"
+            )
+            direct_active_var[inhibited_id] = active_var
+        lines.append("")
 
     repressed_promoters = sorted(promoter_inhibitors)
     if repressed_promoters:
@@ -637,7 +655,10 @@ def generate_specratecl(proteins, modules, interactions, component_map, params,
             inhibitors = promoter_inhibitors[prom]
             fvar = f"_inh_{safe_name(prom)}"
             terms = [
-                _c_rep(f"species[{species_index[iid]}]", rep_thr, hill_n)
+                _c_rep(
+                    direct_active_var.get(iid, f"species[{species_index.get(iid)}]"),
+                    rep_thr, hill_n,
+                )
                 for iid in inhibitors
             ]
             lines.append(
@@ -724,7 +745,7 @@ def generate_specratecl(proteins, modules, interactions, component_map, params,
             )
         lines.append("")
 
-    return "\n".join(lines) if lines else "    // nothing to do"
+    return ("\n".join(lines) if lines else "    // nothing to do"), direct_active_var
 
 
 def generate_sigratecl(signal_species_index, signal_index, membrane_rates):
@@ -987,7 +1008,7 @@ def generate_script(proteins, modules, interactions, component_map, params,
         )
         divide_signals = ""
 
-        specratecl_body = generate_specratecl(
+        specratecl_body, _direct_active_var = generate_specratecl(
             proteins, modules, interactions, component_map, params, ed_chemicals,
             species_index, signal_species_index, signal_index, all_signals,
             diffusible_signals, signal_producers, signal_activated_promoters,
@@ -1029,7 +1050,7 @@ def sigRateCL():
         init_signals   = ""
         divide_signals = ""
         cl_functions   = ""
-        update_logic = generate_update_logic(
+        update_logic, _direct_active_var = generate_update_logic(
             proteins, modules, interactions, component_map, params, ed_chemicals
         )
 
