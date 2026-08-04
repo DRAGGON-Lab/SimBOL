@@ -1,37 +1,3 @@
-"""
-sbml_to_cellmodeller.py
-
-Direct SBML -> CellModeller script converter.
-
-Why direct, and not through the SBOL-JSON bridge (cellmodeller_converter.py)?
-SBOL only records *qualitative* interaction types ("X inhibits Y",
-"X stimulates Y"), so cellmodeller_converter.py has to reconstruct rate
-equations from scratch using generic Hill-function heuristics driven by a
-handful of global "kinetics" parameters. SBML reactions already carry an
-exact, per-reaction kinetic law (a MathML rate expression), so forcing an
-SBML model through the same qualitative bridge would throw that precision
-away and require re-fitting Hill parameters to match it. Instead, this
-module:
-
-  1. Parses the SBML file directly (compartments, species, parameters,
-     reactions + <kineticLaw> MathML) with the standard library only.
-  2. Translates every kinetic law's MathML into both a Python expression
-     (for the plain-Python `update()` path) and an OpenCL C expression
-     (for the `specRateCL()` / `sigRateCL()` GPU kernels used once
-     inter-cell diffusion is enabled), using the *exact* rate law from the
-     model.
-  3. Sums each species' reaction stoichiometries into a per-species ODE,
-     exactly as SBML defines dS/dt = sum_r (stoichiometry_r * rate_r).
-  4. Classifies species as either "local" (tracked per cell only) or
-     "diffusible" (also exchanged with a CellModeller GridDiffusion field)
-     based on which SBML compartment they live in, and assembles a full
-     CellModeller simulation script in the same style/shape as
-     cellmodeller_converter.generate_script().
-
-CLI usage:
-    python sbml_to_cellmodeller.py --sbml circuit.xml --params params.json --output sim.py
-"""
-
 import re
 import json
 import math
@@ -39,27 +5,93 @@ import argparse
 import xml.etree.ElementTree as ET
 from datetime import datetime
 
-# Reuse naming / colour-detection / OpenCL-boundary helpers from the
-# existing SBOL-JSON converter instead of duplicating them.
-from cellmodeller_converter import safe_name, _FP_KEYWORDS, _FP_BIOBRICK, _BOUNDCOND_MAP
-
 
 MATHML_NS = "http://www.w3.org/1998/Math/MathML"
 
-# Compartment-name keywords that mark a compartment as "outside the cell"
-# (i.e. its species should be exchanged with a CellModeller GridDiffusion
-# field rather than only tracked per-cell). Override via
-# params["sbml_mapping"]["diffusible_compartments"] / ["local_compartments"].
+
+# NAMING / COLOUR / BOUNDARY-CONDITION HELPERS
+# (inlined so this module has no dependency on cellmodeller_converter.py)
+
+def safe_name(s):
+    """Convert any display-ID to a safe Python identifier."""
+    name = (s.replace("-", "_")
+             .replace(".", "_")
+             .replace(" ", "_")
+             .replace("(", "_")
+             .replace(")", "_")
+             .lower())
+    # Identifiers can't start with a digit — common for real species names
+    # like "3OC6HSL" / "3OC12HSL", which would otherwise produce invalid
+    # syntax such as `cell.3oc6hsl = 0.0`.
+    if name and name[0].isdigit():
+        name = "_" + name
+    return name
+
+
+# Fluorescent-protein colour lookup: keyword (substring of display_id or
+# name, lowercased) -> (R, G, B).
+_FP_KEYWORDS = {
+    "gfp":        (0.0, 1.0, 0.2),
+    "egfp":       (0.0, 1.0, 0.2),
+    "mgfp":       (0.0, 1.0, 0.2),
+    "mneongreen": (0.0, 1.0, 0.2),
+    "rfp":        (1.0, 0.1, 0.1),
+    "dsred":      (1.0, 0.1, 0.1),
+    "mrfp":       (1.0, 0.1, 0.1),
+    "mcherry":    (0.9, 0.1, 0.3),
+    "mstrawberry":(0.9, 0.2, 0.1),
+    "mkate":      (0.9, 0.1, 0.2),
+    "mruby":      (0.85, 0.1, 0.1),
+    "mneptune":   (0.7, 0.0, 0.3),
+    "cfp":        (0.1, 0.8, 1.0),
+    "ecfp":       (0.1, 0.8, 1.0),
+    "mturquoise": (0.1, 0.9, 0.8),
+    "mtfp":       (0.1, 0.9, 0.8),
+    "yfp":        (0.9, 0.9, 0.0),
+    "eyfp":       (0.9, 0.9, 0.0),
+    "mvenus":     (0.9, 0.9, 0.0),
+    "mcitrine":   (0.9, 0.9, 0.0),
+    "morange":    (1.0, 0.5, 0.0),
+}
+
+# Common BioBrick registry IDs -> (R, G, B)
+_FP_BIOBRICK = {
+    "BBa_E0040": (0.0, 1.0, 0.2),  # GFP
+    "BBa_K2148009": (0.0, 1.0, 0.2),
+    "BBa_K2560042": (0.0, 1.0, 0.2),
+    "BBa_K4946001": (0.0, 1.0, 0.2),
+    "BBa_E1010": (1.0, 0.1, 0.1),  # RFP
+    "BBa_K1323009": (1.0, 0.1, 0.1),
+    "BBa_K3128008": (1.0, 0.1, 0.1),
+    "BBa_E0020": (0.1, 0.8, 1.0),  # CFP
+    "BBa_E0030": (0.9, 0.9, 0.0),  # YFP
+    "BBa_K592101": (0.9, 0.9, 0.0),
+    "BBa_K3427000": (0.9, 0.9, 0.0),
+}
+
+# Maps a human-friendly boundary-condition name (as used in
+# params["signaling"]["boundary_condition"]) to the value passed as
+# CLCrankNicIntegrator's `boundcond` keyword. Confirmed against the real
+# CLCrankNicIntegrator source: `boundcond` is forwarded verbatim to
+# scipy.ndimage.filters.convolve(..., mode=boundcond), so it must be one
+# of scipy's actual mode names — 'reflect', 'constant', 'nearest',
+# 'mirror', 'wrap' — not arbitrary abbreviations like 'const'.
+_BOUNDCOND_MAP = {
+    "reflect":  "reflect",
+    "wrap":     "wrap",
+    "constant": "constant",
+    "fixed":    "constant",
+    "mirror":   "mirror",
+    "nearest":  "nearest",
+}
+
 _EXTRACELLULAR_KEYWORDS = (
     "extracellular", "medium", "media", "environment", "external",
     "supernatant", "exterior", "outside", "out",
 )
 
 
-# XML / MathML HELPERS
-
 def _local(tag):
-    """Strip a `{namespace}tag` down to `tag`."""
     return tag.split("}", 1)[1] if "}" in tag else tag
 
 
@@ -75,7 +107,6 @@ def _find_local(elem, name):
 
 
 def _fmt_num(value, lang):
-    """Format a literal float for Python or OpenCL C source."""
     s = repr(float(value))
     return f"{s}f" if lang == "c" else s
 
@@ -84,27 +115,17 @@ def _zero(lang):
     return "0.0f" if lang == "c" else "0.0"
 
 
-# MATHML -> PYTHON / C EXPRESSION TRANSLATION
-
 class MathTranslator:
-    """
-    Translates a MathML <math> subtree into either a Python or an OpenCL C
-    expression string, resolving <ci> identifiers against a per-reaction
-    symbol table (species -> cell.var / species[idx], parameters and
-    compartment sizes -> inlined numeric literals).
-    """
-
     def __init__(self, species_var, species_index, symbol_values, warnings, context):
-        self.species_var    = species_var     # id -> python var name (for lang='py')
-        self.species_index  = species_index   # id -> species[] slot   (for lang='c')
-        self.symbol_values  = symbol_values    # id -> float (params + compartment sizes)
+        self.species_var    = species_var
+        self.species_index  = species_index
+        self.symbol_values  = symbol_values
         self.warnings       = warnings
         self.context        = context
 
     def translate(self, math_el, lang):
         return self._walk(math_el, lang)
 
-    # -- identifier resolution --
     def _resolve_ci(self, name, lang):
         if name in self.species_var:
             if lang == "py":
@@ -117,7 +138,6 @@ class MathTranslator:
         )
         return _zero(lang)
 
-    # -- cn numeric literal --
     @staticmethod
     def _cn_float(el):
         ctype = el.attrib.get("type", "real")
@@ -298,19 +318,16 @@ class MathTranslator:
         return _zero(lang)
 
 
-# SBML PARSING
-
 class SBMLModel:
     def __init__(self):
-        self.compartments = {}   # id -> {"size": float, "name": str}
-        self.species = {}        # id -> {"name","compartment","initial","boundary","constant"}
-        self.parameters = {}     # id -> float  (global)
-        self.reactions = []      # list of dicts (see parse_reactions)
+        self.compartments = {}
+        self.species = {}
+        self.parameters = {}
+        self.reactions = []
         self.warnings = []
 
 
 def parse_sbml(path_or_string, is_path=True):
-    """Parse an SBML L2/L3 file (any level/version namespace) into an SBMLModel."""
     if is_path:
         tree = ET.parse(path_or_string)
         root = tree.getroot()
@@ -319,7 +336,7 @@ def parse_sbml(path_or_string, is_path=True):
 
     model_el = _find_local(root, "model")
     if model_el is None:
-        raise ValueError("No <model> element found — is this a valid SBML file?")
+        raise ValueError("No <model> element found")
 
     m = SBMLModel()
 
@@ -398,7 +415,6 @@ def _parse_reaction(r, model):
     kinetic_math = None
     kl = _find_local(r, "kineticLaw")
     if kl is not None:
-        # SBML L2 <listOfParameters>, L3 <listOfLocalParameters>
         for list_tag in ("listOfLocalParameters", "listOfParameters"):
             lp = _find_local(kl, list_tag)
             if lp is not None:
@@ -423,14 +439,7 @@ def _parse_reaction(r, model):
     }
 
 
-# TOPOLOGY / CLASSIFICATION
-
 def classify_compartments(model, diffusible_override=None, local_override=None):
-    """
-    Decide which compartments are "diffusible" (exchanged with a
-    GridDiffusion field) vs "local" (tracked per cell only), by name
-    keyword unless explicitly overridden.
-    """
     diffusible_override = set(diffusible_override or [])
     local_override = set(local_override or [])
     diffusible = set()
@@ -447,19 +456,6 @@ def classify_compartments(model, diffusible_override=None, local_override=None):
 
 
 def classify_species(model, diffusible_compartments, ignore_ids=None):
-    """
-    Split species into:
-      - constant_species: boundaryCondition/constant True -> emitted as
-        overridable numeric constants (like the SBOL converter's *_CONC).
-      - local_species:    dynamic, tracked per cell (cell.<var> / species[]).
-      - diffusible_species: dynamic, tracked per cell AND exchanged with a
-        GridDiffusion grid via a configurable membrane rate.
-    Only compartments actually present in the model can make a species
-    diffusible; a model with no extracellular-like compartment naturally
-    produces no diffusible species, mirroring the SBOL converter's
-    behaviour of only turning signalling on when something is genuinely
-    diffusible.
-    """
     ignore_ids = set(ignore_ids or [])
     constant_species, local_species, diffusible_species = [], [], []
 
@@ -486,17 +482,7 @@ def _is_fluorescent(sid, name):
     return None
 
 
-# KINETIC LAW -> PER-SPECIES ODE ASSEMBLY
-
 def build_species_odes(model, species_var, species_index, tracked_ids):
-    """
-    For every tracked (non-constant) species, sum stoichiometry * reaction
-    rate across every reaction that references it, in both Python and C
-    syntax. Returns:
-        odes_py: id -> python expression string (may be "" if unused)
-        odes_c:  id -> C expression string
-        warnings: list[str]
-    """
     warnings = []
 
     all_symbol_values = dict(model.parameters)
@@ -544,18 +530,7 @@ def build_species_odes(model, species_var, species_index, tracked_ids):
     return odes_py, odes_c, warnings
 
 
-# SCRIPT ASSEMBLY
-
 def generate_script(model, params):
-    """
-    Build a full CellModeller simulation script directly from a parsed
-    SBMLModel, using `params` for everything SBML doesn't specify itself
-    (simulation constants, strain/cell-type visuals, grid geometry,
-    per-species diffusion/membrane-exchange rates, constant-species
-    concentrations). Mirrors the structure of
-    cellmodeller_converter.generate_script() so the two families of
-    generated scripts look and behave the same way.
-    """
     sim_p   = params.get("simulation", {})
     cell_types = params.get("cell_types", [{}])
     sig_p   = params.get("signaling", {})
@@ -586,15 +561,11 @@ def generate_script(model, params):
 
     sig_enabled  = sig_p.get("enabled", bool(diffusible_ids)) and bool(diffusible_ids)
     tracked_diffusible_ids = diffusible_ids if sig_enabled else []
-    # If signalling ends up disabled, any would-be-diffusible species falls
-    # back to being tracked as an ordinary per-cell local species instead
-    # of being silently dropped.
     fallback_local_ids = [] if sig_enabled else list(diffusible_ids)
     all_local_ids = local_ids + fallback_local_ids
 
     species_var = {sid: safe_name(model.species[sid]["name"] or sid)
                    for sid in all_local_ids + tracked_diffusible_ids}
-    # de-duplicate any name collisions after safe_name() normalisation
     seen_names = {}
     for sid in all_local_ids + tracked_diffusible_ids:
         base = species_var[sid]
@@ -613,7 +584,6 @@ def generate_script(model, params):
     odes_py, odes_c, warnings = build_species_odes(model, species_var, species_index, tracked_ids)
     warnings.extend(model.warnings)
 
-    # -- constant species -> overridable numeric constants --
     species_overrides = params.get("species_overrides", {})
     const_lines = []
     for sid in sorted(constant_ids):
@@ -625,19 +595,11 @@ def generate_script(model, params):
         sid: safe_name(model.species[sid]["name"] or sid).upper() + "_CONC"
         for sid in constant_ids
     }
-    # constants need to exist inside the OpenCL kernel text too (it is
-    # compiled as a standalone C source string, so Python globals aren't
-    # visible to it) -- emit #define lines at the top of each kernel.
     cl_defines = "\n".join(
         f"    #define {const_name_by_id[sid]} {species_overrides.get(sid, model.species[sid]['initial'])}f"
         for sid in sorted(constant_ids)
     ) if constant_ids else ""
 
-    # Re-resolve constant-species references inside kinetic laws: they were
-    # translated as unresolved (-> 0) above because they aren't in
-    # species_var/symbol_values. Do a second pass now that we know their
-    # generated constant names, via a light regex-free approach: rebuild
-    # odes with constants included in the symbol table up front instead.
     if constant_ids:
         const_symbol_values = {sid: species_overrides.get(sid, model.species[sid]["initial"])
                                 for sid in constant_ids}
@@ -656,7 +618,6 @@ def generate_script(model, params):
     else:
         chem_consts = ""
 
-    # -- grid geometry (only meaningful if signalling is on) --
     grid_len     = max(3, sig_p.get("grid_len", 100))
     grid_z_cells = max(3, sig_p.get("grid_z_cells", 3))
     grid_size    = sig_p.get("grid_size", 4.0)
@@ -687,11 +648,8 @@ def generate_script(model, params):
     use_signals    = sig_enabled and n_signals > 0 and len(tracked_ids) > 0
 
     if not use_signals:
-        # signalling ended up empty after all (e.g. no reactions reference
-        # any diffusible-compartment species) -- fully disable it.
         tracked_diffusible_ids = []
 
-    # -- cell type / strain tables (identical shape to the SBOL converter) --
     color_lines, len_lines, growth_lines, noise_lines, conc_lines = [], [], [], [], []
     for i, ct in enumerate(cell_types):
         c = ct.get("color", [1.0, 0.3, 0.3])
@@ -750,11 +708,11 @@ def generate_script(model, params):
     else:
         sig_import1 = "# from CellModeller.Signalling.GridDiffusion import GridDiffusion"
         sig_import2 = "# from CellModeller.Integration.CLCrankNicIntegrator import CLCrankNicIntegrator"
-        sig_init = "    # Signalling disabled — no diffusible-compartment species reference a reaction"
+        sig_init = "    # Signalling disabled"
         sim_init_call = "    sim.init(biophys, regul, None, None)"
         grid_constants_block = (
             f"gridLen  = {grid_len}   # grid cells per axis\n"
-            f"gridSize = {grid_size}  # µm per grid cell"
+            f"gridSize = {grid_size}  # um per grid cell"
         )
 
     random_seed_line = (
@@ -763,7 +721,6 @@ def generate_script(model, params):
         else "    # tip: set simulation.random_seed in params for reproducibility"
     )
 
-    # -- topology summary comment --
     topo_lines = ["# AUTO-DETECTED SBML TOPOLOGY"]
     topo_lines.append(f"#   Compartments             : {list(model.compartments.keys())}")
     topo_lines.append(f"#   Diffusible compartments  : {sorted(diffusible_compartments)}")
@@ -776,7 +733,6 @@ def generate_script(model, params):
             topo_lines.append(f"#     - {w}")
     topo_comment = "\n".join(topo_lines) + "\n"
 
-    # -- fluorescent-protein colour-by-expression --
     proteins_for_color = [
         {"display_id": sid, "var_name": species_var[sid]}
         for sid in tracked_ids
@@ -817,8 +773,6 @@ def generate_script(model, params):
 
         cl_functions = f'''
 
-# SPEC / SIGNAL RATES (OpenCL C — required by CLCrankNicIntegrator)
-
 def specRateCL():
     return \'\'\'
 {specratecl_body}
@@ -857,8 +811,6 @@ def sigRateCL():
     script = f"""\
 # CellModeller simulation script
 # Generated : {now}
-# Converter : sbml_to_cellmodeller.py  (direct SBML -> CellModeller, no SBOL/JSON bridge)
-{"# NOTE: signalling is ON — species kinetics live in specRateCL(), not update()." if use_signals else ""}
 
 
 from CellModeller.Regulation.ModuleRegulator import ModuleRegulator
@@ -870,12 +822,9 @@ import random
 import math
 {chem_consts}
 {topo_comment}
-# simulation constants
 maxCells = {max_cells}
 {grid_constants_block}
 
-
-# cell type lookup tables
 
 cell_colors          = {colors_dict}
 cell_lens            = {lens_dict}
@@ -883,8 +832,6 @@ cell_growth_rates    = {growth_dict}
 cell_division_noise  = {noise_dict}
 cell_initial_concentrations = {conc_dict}
 
-
-# SETUP
 
 def setup(sim):
 {random_seed_line}
@@ -906,8 +853,6 @@ def setup(sim):
 {add_cells_str}
 
 
-# INIT
-
 def init(cell):
     cell.targetVol  = (cell_lens[cell.cellType]
                        + random.uniform(0.0, cell_division_noise[cell.cellType]))
@@ -916,15 +861,11 @@ def init(cell):
 {init_species}{init_signals}
 
 
-# UPDATE
-
 def update(cells):
     for id, cell in cells.items():
         if cell.volume > cell.targetVol:
             cell.divideFlag = True
 {color_update_str}{update_block}
-
-# DIVIDE
 
 def divide(parent, d1, d2):
     d1.cellType = parent.cellType
@@ -938,9 +879,6 @@ def divide(parent, d1, d2):
 
 def _rebuild_odes_with_constants(model, species_var, species_index, tracked_ids,
                                   const_values, const_name_by_id):
-    """Same as build_species_odes, but constant/boundary species resolve to
-    their named _CONC constant (py: bare name; c: #define'd macro) instead
-    of an 'unresolved identifier' warning."""
     warnings = []
     all_symbol_values = dict(model.parameters)
     for cid, c in model.compartments.items():
@@ -958,7 +896,6 @@ def _rebuild_odes_with_constants(model, species_var, species_index, tracked_ids,
 
         translator = MathTranslator(species_var, species_index, symbol_values, warnings, context)
 
-        # monkey-patch constant-species resolution for this translator
         orig_resolve = translator._resolve_ci
 
         def resolve_with_const(name, lang, _orig=orig_resolve):
@@ -998,24 +935,20 @@ def _rebuild_odes_with_constants(model, species_var, species_index, tracked_ids,
 def _generate_update_logic(local_ids, species_var, odes_py):
     if not local_ids:
         return "        pass"
-    lines = ["        # — species production/consumption, summed from every SBML reaction —"]
+    lines = ["        # species updates"]
     for sid in local_ids:
         var = species_var[sid]
         expr = odes_py.get(sid, "")
         if expr:
             lines.append(f"        cell.{var} += {expr}  # {sid}")
         else:
-            lines.append(f"        # {sid}: not referenced by any reaction (held at initial value)")
+            lines.append(f"        # {sid}: not referenced by any reaction")
         lines.append(f"        cell.{var} = max(0.0, cell.{var})")
         lines.append("")
     return "\n".join(lines)
 
 
 def _generate_color_update(proteins, species_index=None):
-    """Same shading logic as cellmodeller_converter.generate_color_update,
-    kept local so this module has no dependency on a `params`-style
-    kinetics dict (SBML species don't share one global repression
-    threshold — a fixed normalisation constant is used instead)."""
     NORM = 2.0
     for protein in proteins:
         pid, var = protein["display_id"], protein["var_name"]
@@ -1025,7 +958,6 @@ def _generate_color_update(proteins, species_index=None):
         r, g, b = rgb
         expr = f"cell.species[{species_index[pid]}]" if species_index else f"cell.{var}"
         return (
-            f"        # colour by {pid} expression\n"
             f"        _fp_norm = min(1.0, {expr} / {NORM})\n"
             f"        cell.color = [\n"
             f"            {r} * _fp_norm + 0.1 * (1.0 - _fp_norm),\n"
@@ -1040,23 +972,19 @@ def _generate_specratecl(tracked_ids, local_ids, diffusible_ids, species_index,
                          signal_index, odes_c, membrane_rates, cl_defines):
     lines = []
     if cl_defines:
-        lines.append("    // — fixed/external species constants —")
         lines.append(cl_defines)
         lines.append("")
 
-    lines.append("    // — species production/consumption, summed from every SBML reaction —")
     for sid in local_ids:
         idx = species_index[sid]
         expr = odes_c.get(sid, "")
         if expr:
             lines.append(f"    rates[{idx}] = {expr};  // {sid}")
         else:
-            lines.append(f"    rates[{idx}] = 0.0f;  // {sid}: not referenced by any reaction")
+            lines.append(f"    rates[{idx}] = 0.0f;  // {sid}")
     lines.append("")
 
     if diffusible_ids:
-        lines.append("    // — diffusible-compartment species pools "
-                      "(reaction kinetics here, grid exchange in sigRateCL) —")
         for sid in diffusible_ids:
             idx = species_index[sid]
             gidx = signal_index[sid]
@@ -1073,40 +1001,28 @@ def _generate_specratecl(tracked_ids, local_ids, diffusible_ids, species_index,
 
 def _generate_sigratecl(diffusible_ids, species_index, signal_index, membrane_rates):
     if not diffusible_ids:
-        return "    // no diffusible species to exchange with the grid"
+        return "    // no diffusible species"
     lines = []
     for sid in diffusible_ids:
         idx = species_index[sid]
         gidx = signal_index[sid]
         mrate = membrane_rates.get(sid, 0.1)
-        lines.append(f"    // {sid}: secretion into the grid (species[{idx}] -> signals[{gidx}])")
         lines.append(
             f"    rates[{gidx}] = {mrate}f * (species[{idx}] - signals[{gidx}]) * area / gridVolume;"
         )
     return "\n".join(lines)
 
 
-# CLI ENTRY POINT
-
 def main():
-    parser = argparse.ArgumentParser(
-        description="Convert an SBML file directly to a CellModeller simulation script."
-    )
-    parser.add_argument("--sbml", required=True, help="Path to SBML XML")
-    parser.add_argument("--params", required=True, help="Path to parameters JSON")
-    parser.add_argument("--output", default="cellmodeller_output.py",
-                        help="Output .py file (default: cellmodeller_output.py)")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--sbml", required=True)
+    parser.add_argument("--params", required=True)
+    parser.add_argument("--output", default="cellmodeller_output.py")
     args = parser.parse_args()
 
-    print(f"Loading SBML   : {args.sbml}")
     model = parse_sbml(args.sbml)
-    print(f"Loading params : {args.params}")
     with open(args.params) as f:
         params = json.load(f)
-
-    print(f"  Compartments : {list(model.compartments.keys())}")
-    print(f"  Species      : {list(model.species.keys())}")
-    print(f"  Reactions    : {[r['id'] for r in model.reactions]}")
 
     script, warnings = generate_script(model, params)
     if warnings:
