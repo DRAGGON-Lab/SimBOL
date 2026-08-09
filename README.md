@@ -37,8 +37,8 @@ COMPLETAR AQUÍ
 * `README.md`
 * `USER_MANUAL_GRO_PLUGIN.md`: For more detailed instructions of gro plugin.
 
-* `json_to_cellmodeller_converter/`: This section is all about the **CellModell-specific plugin**.
-     * `CellModeller_Converter.py`: Takes the JSON and parameters to build the `.py` file.
+* `json_to_cellmodeller_generator/`: This section is all about the **CellModell-specific plugin**.
+     * `CellModeller_converter.py`: Takes the JSON and parameters to build the `.py` file.
      * `params.py`: Gets all the CellModeller-specific details ready and passes them to the converter.
      * `ui_params.py`: Creates the interactive parameters menu for CellModeller.
 
