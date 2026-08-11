@@ -67,7 +67,7 @@ The simplest way to try out SimBOL (using the GRO plugin) is directly with our p
     https://colab.research.google.com/drive/1v3NV6Cz5RNTp0xLkVwg4ztZ84HLNHoOI#scrollTo=MonufBDOShn7
 
 2.  **Run the Notebook:**
-    Read the wiki for instructions!
+    Read the [wiki](https://github.com/DRAGGON-Lab/SimBOL/wiki) for instructions!
 
 
 ### License
