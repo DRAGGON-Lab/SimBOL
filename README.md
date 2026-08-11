@@ -59,6 +59,16 @@ The simplest way to try out SimBOL (using the GRO plugin) is directly with our p
         * Automatically converting your SBOL3 design into the optimized intermediate JSON format (which will also be downloaded for you to review).
         * Displaying the user-friendly interface for you to configure GRO-specific parameters.
         * Generating your simulation-ready `.gro` file and and downloading it automatically.
+     
+
+### Get Started with SimBOL's CellModeller Plugin 
+
+1.  **Open in Colab:**
+    https://colab.research.google.com/drive/1v3NV6Cz5RNTp0xLkVwg4ztZ84HLNHoOI#scrollTo=MonufBDOShn7
+
+2.  **Run the Notebook:**
+    Read the wiki for instructions!
+
 
 ### License
 
