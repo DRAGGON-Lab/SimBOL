@@ -14,7 +14,7 @@ import numpy as np
 import random
 
 # EXTERNAL CHEMICAL CONCENTRATIONS  (non-diffusible inducers -- set before running)
-ATC_CONC = 1.0  # aTc (Simple chemical) -- not referenced by any interaction in this circuit -- unused
+ATC_CONC = 1.0  # aTc (Simple chemical)
 
 
 # simulation constants
